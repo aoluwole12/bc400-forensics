@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { ethers } from "ethers";
-import { pool, getOrCreateAddress } from "./db/index";
+import { pool, getOrCreateAddress } from "../db";
 
 // ---- Config from .env ----
 const rpcUrl = process.env.BSC_RPC_URL!;
