@@ -15,7 +15,8 @@
     "dotenv": "^16.4.0",
     "ethers": "^6.11.1",
     "express": "^4.19.2",
-    "pg": "^8.11.3"
+    "pg": "^8.11.3",
+    "viem": "^2.0.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
