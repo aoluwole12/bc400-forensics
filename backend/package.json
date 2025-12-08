@@ -2,18 +2,18 @@
   "name": "bc400-backend",
   "version": "1.0.0",
   "private": true,
-  "main": "index.js",
-"scripts": {
-  "dev:indexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
-  "dev:backfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
-  "devserver": "ts-node-dev --respawn --transpile-only src/api.ts",
-  "build": "tsc -p tsconfig.json",
-  "start": "node dist/api.js"
-},
+  "main": "dist/api.js",
+  "scripts": {
+    "devindexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
+    "devbackfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
+    "devserver": "ts-node-dev --respawn --transpile-only src/api.ts",
+    "build": "tsc",
+    "start": "node dist/api.js"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
-    "ethers": "^6.11.2",
+    "ethers": "^6.11.1",
     "express": "^4.19.2",
     "pg": "^8.11.3"
   },
