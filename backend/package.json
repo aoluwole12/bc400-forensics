@@ -3,13 +3,13 @@
   "version": "1.0.0",
   "private": true,
   "main": "dist/api.js",
-  "scripts": {
-    "devindexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
-    "devbackfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
-    "devserver": "ts-node-dev --respawn --transpile-only src/api.ts",
-    "build": "tsc",
-    "start": "node dist/api.js"
-  },
+"scripts": {
+  "devindexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
+  "devbackfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
+  "devserver": "ts-node-dev --respawn --transpile-only src/api.ts",
+  "build": "tsc",
+  "start": "npm run build && node dist/api.js"
+},
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.0",
