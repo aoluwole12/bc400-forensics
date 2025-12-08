@@ -1,0 +1,14 @@
+version: "3.8"
+services:
+  db:
+    image: postgres:16
+    container_name: bc400_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bc400
+      POSTGRES_PASSWORD: bc400password
+      POSTGRES_DB: bc400_forensics
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
