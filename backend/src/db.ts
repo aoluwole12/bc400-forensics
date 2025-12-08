@@ -1,12 +1,17 @@
 import "dotenv/config";
 import { Pool, PoolClient } from "pg";
 
+// Prefer a single DATABASE_URL (works for Render + local)
+const connectionString =
+  process.env.DATABASE_URL ||
+  "postgresql://bc400:bc400password@localhost:5432/bc400_forensics";
+
 export const pool = new Pool({
-  host: process.env.DB_HOST || "localhost",
-  port: Number(process.env.DB_PORT || 5432),
-  user: process.env.DB_USER || "bc400",
-  password: process.env.DB_PASSWORD || "bc400password",
-  database: process.env.DB_NAME || "bc400_forensics",
+  connectionString,
+  // Render Postgres needs SSL
+  ssl: connectionString.includes("render.com")
+    ? { rejectUnauthorized: false }
+    : undefined,
 });
 
 /**
@@ -27,14 +32,14 @@ export async function getOrCreateAddress(
   let localClient: PoolClient;
   let releaseAfter = false;
 
-  // If caller gave us a real PoolClient (backfill), use it.
   if (
     clientOrSomething &&
     typeof (clientOrSomething as any).query === "function"
   ) {
+    // Backfill passed a real client
     localClient = clientOrSomething as PoolClient;
   } else {
-    // Otherwise (indexer passing a bigint, or nothing) create our own client.
+    // Indexer or generic call – create our own client
     localClient = await pool.connect();
     releaseAfter = true;
   }
@@ -44,6 +49,7 @@ export async function getOrCreateAddress(
       "SELECT id FROM addresses WHERE address = $1",
       [lower]
     );
+
     if (existing.rowCount > 0) {
       return existing.rows[0].id as number;
     }
@@ -52,6 +58,7 @@ export async function getOrCreateAddress(
       "INSERT INTO addresses (address) VALUES ($1) RETURNING id",
       [lower]
     );
+
     return inserted.rows[0].id as number;
   } finally {
     if (releaseAfter && localClient) {
