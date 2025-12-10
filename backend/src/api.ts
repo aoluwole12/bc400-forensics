@@ -1,190 +1,258 @@
-// src/api.ts
-import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { pool } from "./db";
+import { Pool } from "pg";
 
 const PORT = Number(process.env.PORT || 4000);
-const app = express();
 
-// Allow frontend to call this API
-app.use(
-  cors({
-    origin: [
-      "http://localhost:5173",
-      "https://bc400forensics.com",
-      "https://www.bc400forensics.com",
-    ],
-  })
-);
+// Use DATABASE_URL if present (Render style), otherwise local docker Postgres
+const pool = new Pool({
+  connectionString:
+    process.env.DATABASE_URL ||
+    "postgres://bc400:bc400password@localhost:5432/bc400_forensics",
+});
+
+const app = express();
+app.use(cors());
 app.use(express.json());
 
-// Simple health check
+// Small helper for logging + consistent error JSON
+function handleError(res: express.Response, where: string, err: unknown) {
+  console.error(`Error in ${where}:`, err);
+  res.status(500).json({
+    error: `Failed to load ${where}`,
+    details: err instanceof Error ? err.message : String(err),
+  });
+}
+
+// ----------------------
+// Health check
+// ----------------------
 app.get("/health", async (_req, res) => {
   try {
-    await pool.query("SELECT 1");
+    const client = await pool.connect();
+    client.release();
     res.json({ ok: true });
   } catch (err) {
-    console.error("Health check failed:", err);
-    res.status(500).json({ ok: false });
+    handleError(res, "health", err);
   }
 });
 
-// ---------- SUMMARY CARDS ----------
-app.get("/api/summary", async (_req, res) => {
+// ----------------------
+// /summary – chain snapshot
+// ----------------------
+app.get("/summary", async (_req, res) => {
+  const client = await pool.connect();
   try {
-    const walletsResult = await pool.query(
-      "SELECT COUNT(*)::bigint AS count FROM addresses"
-    );
-    const transfersResult = await pool.query(
-      "SELECT COUNT(*)::bigint AS count FROM transfers"
-    );
-    const blocksResult = await pool.query(
-      "SELECT MIN(block_number)::bigint AS first, MAX(block_number)::bigint AS last FROM transfers"
-    );
-
-    res.json({
-      totalWallets: Number(walletsResult.rows[0].count),
-      totalTransfers: Number(transfersResult.rows[0].count),
-      firstBlock: Number(blocksResult.rows[0].first),
-      lastIndexedBlock: Number(blocksResult.rows[0].last),
-    });
-  } catch (err) {
-    console.error("Error in /api/summary:", err);
-    res.status(500).json({ error: "Failed to load summary" });
-  }
-});
-
-// ---------- TOP HOLDERS ----------
-app.get("/api/top-holders", async (req, res) => {
-  const limit = Number(req.query.limit || 8);
-
-  const sql = `
-    SELECT
-      a.address,
-      SUM(
-        CASE WHEN t.to_address_id = a.id THEN t.raw_amount::numeric ELSE 0 END
-      ) -
-      SUM(
-        CASE WHEN t.from_address_id = a.id THEN t.raw_amount::numeric ELSE 0 END
-      ) AS balance_bc400
-    FROM addresses a
-    JOIN transfers t
-      ON a.id = t.from_address_id OR a.id = t.to_address_id
-    GROUP BY a.address
-    HAVING
-      SUM(CASE WHEN t.to_address_id = a.id THEN t.raw_amount::numeric ELSE 0 END) -
-      SUM(CASE WHEN t.from_address_id = a.id THEN t.raw_amount::numeric ELSE 0 END) <> 0
-    ORDER BY balance_bc400 DESC
-    LIMIT $1;
-  `;
-
-  try {
-    const result = await pool.query(sql, [limit]);
-    res.json({
-      holders: result.rows.map((row, idx) => ({
-        rank: idx + 1,
-        address: row.address,
-        balance_bc400: row.balance_bc400,
-      })),
-    });
-  } catch (err) {
-    console.error("Error in /api/top-holders:", err);
-    res.status(500).json({ error: "Failed to load top holders" });
-  }
-});
-
-// ---------- LATEST TRANSFERS (wallet ↔ wallet + balances) ----------
-app.get("/api/latest-transfers", async (req, res) => {
-  const limit = Number(req.query.limit || 8);
-
-  const sql = `
-    WITH balances AS (
+    // First/last block + total transfers from transfers table
+    const stats = await client.query<{
+      first_block: string | null;
+      last_block: string | null;
+      total_transfers: string;
+    }>(
+      `
       SELECT
-        a.id,
-        a.address,
-        SUM(
-          CASE WHEN t.to_address_id = a.id THEN t.raw_amount::numeric ELSE 0 END
-        ) -
-        SUM(
-          CASE WHEN t.from_address_id = a.id THEN t.raw_amount::numeric ELSE 0 END
-        ) AS balance_bc400
-      FROM addresses a
-      JOIN transfers t
-        ON a.id = t.from_address_id OR a.id = t.to_address_id
-      GROUP BY a.id, a.address
-    )
-    SELECT
-      t.block_number,
-      t.block_time,
-      from_addr.address AS from_address,
-      COALESCE(fb.balance_bc400, 0) AS from_balance_bc400,
-      to_addr.address   AS to_address,
-      COALESCE(tb.balance_bc400, 0) AS to_balance_bc400,
-      t.raw_amount::numeric AS amount_bc400
-    FROM transfers t
-    JOIN addresses from_addr ON t.from_address_id = from_addr.id
-    JOIN addresses to_addr   ON t.to_address_id   = to_addr.id
-    LEFT JOIN balances fb ON fb.id = from_addr.id
-    LEFT JOIN balances tb ON tb.id = to_addr.id
-    WHERE
-      from_addr.address <> to_addr.address
-      AND from_addr.address NOT IN (
-        '0x0000000000000000000000000000000000000000',
-        '0x000000000000000000000000000000000000dead'
-      )
-      AND to_addr.address NOT IN (
-        '0x0000000000000000000000000000000000000000',
-        '0x000000000000000000000000000000000000dead'
-      )
-    ORDER BY t.block_number DESC, t.log_index DESC
-    LIMIT $1;
-  `;
+        MIN(block_number)::bigint AS first_block,
+        MAX(block_number)::bigint AS last_block,
+        COUNT(*)::bigint       AS total_transfers
+      FROM transfers;
+    `,
+    );
 
-  try {
-    const result = await pool.query(sql, [limit]);
+    const row = stats.rows[0];
+
+    // Total wallets from addresses table
+    const wallets = await client.query<{ total_wallets: string }>(
+      `SELECT COUNT(*)::bigint AS total_wallets FROM addresses;`,
+    );
+
     res.json({
-      transfers: result.rows.map((row) => ({
-        block_number: Number(row.block_number),
-        block_time: row.block_time,
-        from_address: row.from_address,
-        from_balance_bc400: row.from_balance_bc400,
-        to_address: row.to_address,
-        to_balance_bc400: row.to_balance_bc400,
-        amount_bc400: row.amount_bc400,
+      firstBlock: row?.first_block ? Number(row.first_block) : null,
+      lastIndexedBlock: row?.last_block ? Number(row.last_block) : null,
+      totalTransfers: row ? Number(row.total_transfers) : 0,
+      totalWallets: wallets.rows[0]
+        ? Number(wallets.rows[0].total_wallets)
+        : 0,
+    });
+  } catch (err) {
+    handleError(res, "summary", err);
+  } finally {
+    client.release();
+  }
+});
+
+// ----------------------
+// /top-holders – from holder_balances
+// ----------------------
+app.get("/top-holders", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 25, 1),
+      200,
+    );
+
+    const result = await client.query<
+      {
+        address_id: number;
+        address: string;
+        balance_bc400: string;
+        balance_raw: string;
+        first_seen: string;
+        last_seen: string;
+        tx_count: number;
+        last_block_number: string | null;
+        last_block_time: string | null;
+        last_tx_hash: string | null;
+        tags: string | null;
+      }
+    >(
+      `
+      SELECT
+        hb.address_id,
+        a.address,
+        hb.balance_bc400,
+        hb.balance_raw,
+        hb.first_seen,
+        hb.last_seen,
+        hb.tx_count,
+        hb.last_block_number,
+        hb.last_block_time,
+        hb.last_tx_hash,
+        COALESCE(string_agg(wt.tag, ',' ORDER BY wt.tag), '') AS tags
+      FROM holder_balances hb
+      JOIN addresses a
+        ON a.id = hb.address_id
+      LEFT JOIN wallet_tags wt
+        ON wt.address_id = hb.address_id
+      WHERE hb.balance_bc400 > 0
+      GROUP BY
+        hb.address_id,
+        a.address,
+        hb.balance_bc400,
+        hb.balance_raw,
+        hb.first_seen,
+        hb.last_seen,
+        hb.tx_count,
+        hb.last_block_number,
+        hb.last_block_time,
+        hb.last_tx_hash
+      ORDER BY hb.balance_bc400 DESC
+      LIMIT $1;
+    `,
+      [limit],
+    );
+
+    res.json({
+      holders: result.rows.map((r, idx) => ({
+        rank: idx + 1,
+        addressId: r.address_id,
+        address: r.address,
+        balanceBc400: r.balance_bc400,
+        balanceRaw: r.balance_raw,
+        firstSeen: r.first_seen,
+        lastSeen: r.last_seen,
+        txCount: r.tx_count,
+        lastBlockNumber: r.last_block_number
+          ? Number(r.last_block_number)
+          : null,
+        lastBlockTime: r.last_block_time,
+        lastTxHash: r.last_tx_hash,
+        tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
       })),
     });
   } catch (err) {
-    console.error("Error in /api/latest-transfers:", err);
-    res.status(500).json({ error: "Failed to load latest transfers" });
+    handleError(res, "top holders", err);
+  } finally {
+    client.release();
   }
 });
 
-// ---------- SQL playground endpoint (read-only) ----------
-app.post("/api/sql", async (req, res) => {
-  const { sql } = req.body as { sql?: string };
-
-  if (!sql || typeof sql !== "string") {
-    return res.status(400).json({ error: "sql field is required" });
-  }
-
-  // Very defensive: only allow SELECT, no mutations.
-  const trimmed = sql.trim().toUpperCase();
-  if (!trimmed.startsWith("SELECT")) {
-    return res
-      .status(400)
-      .json({ error: "Only read-only SELECT queries are allowed" });
-  }
-
+// ----------------------
+// /transfers – recent transfers
+// ----------------------
+app.get("/transfers", async (req, res) => {
+  const client = await pool.connect();
   try {
-    const result = await pool.query(sql);
-    res.json({ rows: result.rows });
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 50, 1),
+      500,
+    );
+
+    const result = await client.query<
+      {
+        block_number: string;
+        block_time: string;
+        tx_hash: string;
+        from_address: string | null;
+        to_address: string | null;
+        raw_amount: string;
+      }
+    >(
+      `
+      SELECT
+        t.block_number,
+        t.block_time,
+        t.tx_hash,
+        af.address AS from_address,
+        at.address AS to_address,
+        t.raw_amount
+      FROM transfers t
+      LEFT JOIN addresses af ON af.id = t.from_address_id
+      LEFT JOIN addresses at ON at.id = t.to_address_id
+      ORDER BY t.block_number DESC, t.log_index DESC
+      LIMIT $1;
+    `,
+      [limit],
+    );
+
+    res.json({
+      transfers: result.rows.map((r) => ({
+        blockNumber: Number(r.block_number),
+        blockTime: r.block_time,
+        txHash: r.tx_hash,
+        fromAddress: r.from_address,
+        toAddress: r.to_address,
+        rawAmount: r.raw_amount,
+      })),
+    });
   } catch (err) {
-    console.error("Error in /api/sql:", err);
-    res.status(500).json({ error: "Query failed", details: String(err) });
+    handleError(res, "transfers", err);
+  } finally {
+    client.release();
   }
 });
 
+// ----------------------
+// /sql – simple SELECT-only console
+// ----------------------
+app.post("/sql", async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const sql = String(req.body?.sql || "").trim();
+
+    // Very basic safety: allow SELECT only
+    if (!sql.toLowerCase().startsWith("select")) {
+      return res
+        .status(400)
+        .json({ error: "Only SELECT queries are allowed" });
+    }
+
+    const result = await client.query(sql);
+    res.json({
+      rowCount: result.rowCount,
+      rows: result.rows,
+      fields: result.fields.map((f) => f.name),
+    });
+  } catch (err) {
+    handleError(res, "sql console", err);
+  } finally {
+    client.release();
+  }
+});
+
+// ----------------------
+// Start server
+// ----------------------
 app.listen(PORT, () => {
   console.log(`BC400 API listening on http://localhost:${PORT}`);
 });
