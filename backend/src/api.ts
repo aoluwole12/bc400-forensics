@@ -4,7 +4,7 @@ import { Pool } from "pg";
 
 const PORT = Number(process.env.PORT || 4000);
 
-// Use DATABASE_URL if present (Render style), otherwise local docker Postgres
+// Use DATABASE_URL on Render, otherwise local docker Postgres
 const pool = new Pool({
   connectionString:
     process.env.DATABASE_URL ||
@@ -43,7 +43,6 @@ app.get("/health", async (_req, res) => {
 app.get("/summary", async (_req, res) => {
   const client = await pool.connect();
   try {
-    // First/last block + total transfers from transfers table
     const stats = await client.query<{
       first_block: string | null;
       last_block: string | null;
@@ -55,12 +54,11 @@ app.get("/summary", async (_req, res) => {
         MAX(block_number)::bigint AS last_block,
         COUNT(*)::bigint       AS total_transfers
       FROM transfers;
-      `,
+    `,
     );
 
     const row = stats.rows[0];
 
-    // Total wallets from addresses table
     const wallets = await client.query<{ total_wallets: string }>(
       `SELECT COUNT(*)::bigint AS total_wallets FROM addresses;`,
     );
@@ -86,48 +84,63 @@ app.get("/summary", async (_req, res) => {
 app.get("/top-holders", async (req, res) => {
   const client = await pool.connect();
   try {
-    const rawLimit = Number(req.query.limit ?? 25);
-    const limit = Number.isFinite(rawLimit)
-      ? Math.min(Math.max(rawLimit, 1), 200)
-      : 25;
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 25, 1),
+      200,
+    );
 
     const result = await client.query<{
+      address_id: number;
       address: string;
       balance_bc400: string;
+      balance_raw: string;
       tx_count: number;
-      tags: string;
+      tags: string | null;
       first_seen: string;
       last_seen: string;
+      last_block_number: string | null;
+      last_block_time: string | null;
+      last_tx_hash: string | null;
     }>(
       `
       SELECT
-        address,
-        balance_bc400,
-        tx_count,
-        tags,
-        first_seen,
-        last_seen
-      FROM holder_balances
-      WHERE balance_bc400 > 0
-      ORDER BY balance_bc400 DESC
+        hb.address_id,
+        a.address,
+        hb.balance_bc400,
+        hb.balance_raw,
+        hb.tx_count,
+        hb.tags,
+        hb.first_seen,
+        hb.last_seen,
+        hb.last_block_number,
+        hb.last_block_time,
+        hb.last_tx_hash
+      FROM holder_balances hb
+      JOIN addresses a
+        ON a.id = hb.address_id
+      WHERE hb.balance_bc400 > 0
+      ORDER BY hb.balance_bc400 DESC
       LIMIT $1;
-      `,
+    `,
       [limit],
     );
 
     res.json({
-      holders: result.rows.map((row, idx) => ({
+      holders: result.rows.map((r, idx) => ({
         rank: idx + 1,
-        address: row.address,
-        // keep the field name the frontend already expects
-        balance_bc400: row.balance_bc400,
-        tx_count: row.tx_count,
-        tags:
-          row.tags === "none"
-            ? []
-            : row.tags.split(",").map((t) => t.trim()).filter(Boolean),
-        first_seen: row.first_seen,
-        last_seen: row.last_seen,
+        addressId: r.address_id,
+        address: r.address,
+        balanceBc400: r.balance_bc400,
+        balanceRaw: r.balance_raw,
+        txCount: r.tx_count,
+        tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
+        firstSeen: r.first_seen,
+        lastSeen: r.last_seen,
+        lastBlockNumber: r.last_block_number
+          ? Number(r.last_block_number)
+          : null,
+        lastBlockTime: r.last_block_time,
+        lastTxHash: r.last_tx_hash,
       })),
     });
   } catch (err) {
@@ -143,10 +156,10 @@ app.get("/top-holders", async (req, res) => {
 app.get("/transfers", async (req, res) => {
   const client = await pool.connect();
   try {
-    const rawLimit = Number(req.query.limit ?? 50);
-    const limit = Number.isFinite(rawLimit)
-      ? Math.min(Math.max(rawLimit, 1), 500)
-      : 50;
+    const limit = Math.min(
+      Math.max(Number(req.query.limit) || 50, 1),
+      500,
+    );
 
     const result = await client.query<{
       block_number: string;
@@ -169,7 +182,7 @@ app.get("/transfers", async (req, res) => {
       LEFT JOIN addresses at ON at.id = t.to_address_id
       ORDER BY t.block_number DESC, t.log_index DESC
       LIMIT $1;
-      `,
+    `,
       [limit],
     );
 
@@ -198,7 +211,6 @@ app.post("/sql", async (req, res) => {
   try {
     const sql = String(req.body?.sql || "").trim();
 
-    // Very basic safety: allow SELECT only
     if (!sql.toLowerCase().startsWith("select")) {
       return res
         .status(400)
