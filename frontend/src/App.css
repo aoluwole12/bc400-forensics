@@ -1,0 +1,43 @@
+.app-shell {
+  border-radius: 1.5rem;
+  border: 3px solid #facc15;
+  box-shadow: 0 0 40px rgba(250, 204, 21, 0.45);
+  background-color: #050505;
+}
+
+/* Yellow summary cards */
+.metric-card,
+.metric-box {
+  background-color: #facc15;
+  color: #050505;
+}
+
+/* Numeric values look nicer when evenly spaced */
+.metric-value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Main SQL panel */
+.sql-panel {
+  border-radius: 1.25rem;
+  border: 2px solid rgba(250, 204, 21, 0.8);
+  background-color: #020617;
+}
+
+.sql-heading {
+  letter-spacing: 0.28em;
+}
+
+/* Thin scrollbars for the results section */
+.sql-panel ::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.sql-panel ::-webkit-scrollbar-track {
+  background: #020617;
+}
+
+.sql-panel ::-webkit-scrollbar-thumb {
+  background: rgba(250, 204, 21, 0.65);
+}
