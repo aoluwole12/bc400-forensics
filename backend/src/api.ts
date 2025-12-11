@@ -55,7 +55,7 @@ app.get("/summary", async (_req, res) => {
         MAX(block_number)::bigint AS last_block,
         COUNT(*)::bigint       AS total_transfers
       FROM transfers;
-    `,
+      `,
     );
 
     const row = stats.rows[0];
@@ -81,18 +81,21 @@ app.get("/summary", async (_req, res) => {
 });
 
 // ----------------------
-// /top-holders – from holder_balances (address TEXT PK schema)
+// /top-holders – from holder_balances snapshot
 // ----------------------
 app.get("/top-holders", async (req, res) => {
   const client = await pool.connect();
   try {
-    const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 200);
+    const rawLimit = Number(req.query.limit ?? 25);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(rawLimit, 1), 200)
+      : 25;
 
     const result = await client.query<{
       address: string;
       balance_bc400: string;
       tx_count: number;
-      tags: string | null;
+      tags: string;
       first_seen: string;
       last_seen: string;
     }>(
@@ -108,22 +111,23 @@ app.get("/top-holders", async (req, res) => {
       WHERE balance_bc400 > 0
       ORDER BY balance_bc400 DESC
       LIMIT $1;
-    `,
+      `,
       [limit],
     );
 
     res.json({
-      holders: result.rows.map((r, idx) => ({
+      holders: result.rows.map((row, idx) => ({
         rank: idx + 1,
-        address: r.address,
-        balance_bc400: r.balance_bc400,
-        tx_count: r.tx_count,
+        address: row.address,
+        // keep the field name the frontend already expects
+        balance_bc400: row.balance_bc400,
+        tx_count: row.tx_count,
         tags:
-          r.tags && r.tags !== "none"
-            ? r.tags.split(",").map((t) => t.trim()).filter(Boolean)
-            : [],
-        first_seen: r.first_seen,
-        last_seen: r.last_seen,
+          row.tags === "none"
+            ? []
+            : row.tags.split(",").map((t) => t.trim()).filter(Boolean),
+        first_seen: row.first_seen,
+        last_seen: row.last_seen,
       })),
     });
   } catch (err) {
@@ -139,7 +143,10 @@ app.get("/top-holders", async (req, res) => {
 app.get("/transfers", async (req, res) => {
   const client = await pool.connect();
   try {
-    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
+    const rawLimit = Number(req.query.limit ?? 50);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(rawLimit, 1), 500)
+      : 50;
 
     const result = await client.query<{
       block_number: string;
@@ -162,7 +169,7 @@ app.get("/transfers", async (req, res) => {
       LEFT JOIN addresses at ON at.id = t.to_address_id
       ORDER BY t.block_number DESC, t.log_index DESC
       LIMIT $1;
-    `,
+      `,
       [limit],
     );
 
