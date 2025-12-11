@@ -11,7 +11,8 @@
     "build": "tsc",
     "start": "npm run build && node dist/api.js",
     "indexer": "npm run build && node dist/indexer.js",
-    "backfill": "npm run build && node dist/backfill.js"
+    "backfill": "npm run build && node dist/backfill.js",
+    "rebuild-holders": "npm run build && node dist/rebuildHolders.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
