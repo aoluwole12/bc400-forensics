@@ -1,60 +1,23 @@
 import { Pool } from "pg";
 
-const connectionString =
-  process.env.DATABASE_URL ||
-  "postgres://bc400:bc400password@localhost:5432/bc400_forensics";
-
-const pool = new Pool({ connectionString });
+// Use Render DATABASE_URL in production, docker Postgres locally
+const pool = new Pool({
+  connectionString:
+    process.env.DATABASE_URL ||
+    "postgres://bc400:bc400password@localhost:5432/bc400_forensics",
+});
 
 async function rebuildHolderBalances() {
-  console.log("=== Rebuilding holder_balances from transfers ===");
-
   const client = await pool.connect();
   try {
+    console.log("=== Rebuilding holder_balances from transfers ===");
+
     await client.query("BEGIN");
 
-    // 1) Clear existing snapshot so we don't get duplicates
-    await client.query("TRUNCATE TABLE holder_balances;");
+    // Start from a clean snapshot
+    await client.query("TRUNCATE holder_balances;");
 
-    // 2) Rebuild from transfers + addresses
     const result = await client.query(`
-      WITH agg AS (
-        SELECT
-          a.id AS address_id,
-          -- net raw token balance
-          SUM(
-            CASE WHEN t.to_address_id = a.id
-              THEN t.raw_amount::numeric
-              ELSE 0
-            END
-          ) -
-          SUM(
-            CASE WHEN t.from_address_id = a.id
-              THEN t.raw_amount::numeric
-              ELSE 0
-            END
-          ) AS balance_raw,
-          COUNT(*)::int AS tx_count,
-          MIN(t.block_time) AS first_seen,
-          MAX(t.block_time) AS last_seen
-        FROM addresses a
-        JOIN transfers t
-          ON t.to_address_id = a.id OR t.from_address_id = a.id
-        GROUP BY a.id
-        HAVING
-          SUM(
-            CASE WHEN t.to_address_id = a.id
-              THEN t.raw_amount::numeric
-              ELSE 0
-            END
-          ) -
-          SUM(
-            CASE WHEN t.from_address_id = a.id
-              THEN t.raw_amount::numeric
-              ELSE 0
-            END
-          ) > 0
-      )
       INSERT INTO holder_balances (
         address_id,
         balance_raw,
@@ -63,48 +26,88 @@ async function rebuildHolderBalances() {
         tags,
         first_seen,
         last_seen,
+        last_tx_hash,
         last_block_number,
-        last_block_time,
-        last_tx_hash
+        last_block_time
       )
       SELECT
-        agg.address_id,
-        agg.balance_raw,
-        -- If BC400 has a different decimals value, change 1e18 here
-        agg.balance_raw / 1e18::numeric AS balance_bc400,
-        agg.tx_count,
+        a.id AS address_id,
+        -- raw balance in token units
+        SUM(
+          CASE WHEN t.to_address_id = a.id THEN t.raw_amount::numeric ELSE 0::numeric END
+        )
+        -
+        SUM(
+          CASE WHEN t.from_address_id = a.id THEN t.raw_amount::numeric ELSE 0::numeric END
+        ) AS balance_raw,
+
+        -- BC400 balance (assuming 9 decimals)
+        (
+          SUM(
+            CASE WHEN t.to_address_id = a.id THEN t.raw_amount::numeric ELSE 0::numeric END
+          )
+          -
+          SUM(
+            CASE WHEN t.from_address_id = a.id THEN t.raw_amount::numeric ELSE 0::numeric END
+          )
+        ) / 1e9::numeric AS balance_bc400,
+
+        COUNT(*) AS tx_count,
         'none' AS tags,
-        agg.first_seen,
-        agg.last_seen,
-        last_tx.block_number,
-        last_tx.block_time,
-        last_tx.tx_hash
-      FROM agg
-      LEFT JOIN LATERAL (
-        SELECT
-          t.block_number,
-          t.block_time,
-          t.tx_hash
-        FROM transfers t
-        WHERE t.to_address_id = agg.address_id
-           OR t.from_address_id = agg.address_id
-        ORDER BY t.block_number DESC, t.log_index DESC
-        LIMIT 1
-      ) AS last_tx ON TRUE
-      ORDER BY agg.balance_raw DESC;
+
+        MIN(t.block_time) AS first_seen,
+        MAX(t.block_time) AS last_seen,
+
+        -- last tx details via subqueries
+        (
+          SELECT t2.tx_hash
+          FROM transfers t2
+          WHERE t2.to_address_id = a.id OR t2.from_address_id = a.id
+          ORDER BY t2.block_number DESC, t2.log_index DESC
+          LIMIT 1
+        ) AS last_tx_hash,
+
+        (
+          SELECT t2.block_number
+          FROM transfers t2
+          WHERE t2.to_address_id = a.id OR t2.from_address_id = a.id
+          ORDER BY t2.block_number DESC, t2.log_index DESC
+          LIMIT 1
+        ) AS last_block_number,
+
+        (
+          SELECT t2.block_time
+          FROM transfers t2
+          WHERE t2.to_address_id = a.id OR t2.from_address_id = a.id
+          ORDER BY t2.block_number DESC, t2.log_index DESC
+          LIMIT 1
+        ) AS last_block_time
+
+      FROM addresses a
+      JOIN transfers t
+        ON t.to_address_id = a.id OR t.from_address_id = a.id
+      GROUP BY a.id
+      HAVING
+        (
+          SUM(
+            CASE WHEN t.to_address_id = a.id THEN t.raw_amount::numeric ELSE 0::numeric END
+          )
+          -
+          SUM(
+            CASE WHEN t.from_address_id = a.id THEN t.raw_amount::numeric ELSE 0::numeric END
+          )
+        ) > 0
+      ORDER BY balance_raw DESC;
     `);
 
     await client.query("COMMIT");
-
     console.log(
-      "holder_balances rebuild COMPLETE - inserted " +
-        result.rowCount +
-        " rows.",
+      `holder_balances rebuild COMPLETE – inserted ${result.rowCount} rows.`,
     );
   } catch (err) {
     await client.query("ROLLBACK");
     console.error("Fatal error in rebuildHolders script:", err);
-    process.exitCode = 1;
+    throw err;
   } finally {
     client.release();
     await pool.end();
@@ -112,6 +115,6 @@ async function rebuildHolderBalances() {
 }
 
 rebuildHolderBalances().catch((err) => {
-  console.error("Unexpected error in rebuildHolderBalances():", err);
-  process.exitCode = 1;
+  console.error("Unexpected error in rebuildHolderBalances()", err);
+  process.exit(1);
 });
