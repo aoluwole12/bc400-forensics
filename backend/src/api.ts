@@ -4,7 +4,7 @@ import { Pool } from "pg";
 
 const PORT = Number(process.env.PORT || 4000);
 
-// Use DATABASE_URL on Render, otherwise local docker Postgres
+// Use DATABASE_URL if present (Render style), otherwise local docker Postgres
 const pool = new Pool({
   connectionString:
     process.env.DATABASE_URL ||
@@ -43,6 +43,7 @@ app.get("/health", async (_req, res) => {
 app.get("/summary", async (_req, res) => {
   const client = await pool.connect();
   try {
+    // First/last block + total transfers from transfers table
     const stats = await client.query<{
       first_block: string | null;
       last_block: string | null;
@@ -59,6 +60,7 @@ app.get("/summary", async (_req, res) => {
 
     const row = stats.rows[0];
 
+    // Total wallets from addresses table
     const wallets = await client.query<{ total_wallets: string }>(
       `SELECT COUNT(*)::bigint AS total_wallets FROM addresses;`,
     );
@@ -79,7 +81,7 @@ app.get("/summary", async (_req, res) => {
 });
 
 // ----------------------
-// /top-holders – from holder_balances snapshot
+// /top-holders – from holder_balances
 // ----------------------
 app.get("/top-holders", async (req, res) => {
   const client = await pool.connect();
@@ -89,36 +91,66 @@ app.get("/top-holders", async (req, res) => {
       200,
     );
 
-    const result = await client.query<{
-      address_id: number;
-      address: string;
-      balance_bc400: string;
-      balance_raw: string;
-      tx_count: number;
-      tags: string | null;
-      first_seen: string;
-      last_seen: string;
-      last_block_number: string | null;
-      last_block_time: string | null;
-      last_tx_hash: string | null;
+    // 1) Get the snapshot time (when this holder_balances view is current).
+    //    We use the max last_block_time across the snapshot.
+    const snapshotResult = await client.query<{
+      snapshot_time: string | null;
     }>(
+      `
+      SELECT MAX(last_block_time) AS snapshot_time
+      FROM holder_balances;
+    `,
+    );
+
+    const snapshotUpdatedAt =
+      snapshotResult.rows[0]?.snapshot_time ?? null;
+
+    // 2) Get the actual holders list
+    const result = await client.query<
+      {
+        address_id: number;
+        address: string;
+        balance_bc400: string;
+        balance_raw: string;
+        first_seen: string;
+        last_seen: string;
+        tx_count: number;
+        last_block_number: string | null;
+        last_block_time: string | null;
+        last_tx_hash: string | null;
+        tags: string | null;
+      }
+    >(
       `
       SELECT
         hb.address_id,
         a.address,
         hb.balance_bc400,
         hb.balance_raw,
-        hb.tx_count,
-        hb.tags,
         hb.first_seen,
         hb.last_seen,
+        hb.tx_count,
         hb.last_block_number,
         hb.last_block_time,
-        hb.last_tx_hash
+        hb.last_tx_hash,
+        COALESCE(string_agg(wt.tag, ',' ORDER BY wt.tag), '') AS tags
       FROM holder_balances hb
       JOIN addresses a
         ON a.id = hb.address_id
+      LEFT JOIN wallet_tags wt
+        ON wt.address_id = hb.address_id
       WHERE hb.balance_bc400 > 0
+      GROUP BY
+        hb.address_id,
+        a.address,
+        hb.balance_bc400,
+        hb.balance_raw,
+        hb.first_seen,
+        hb.last_seen,
+        hb.tx_count,
+        hb.last_block_number,
+        hb.last_block_time,
+        hb.last_tx_hash
       ORDER BY hb.balance_bc400 DESC
       LIMIT $1;
     `,
@@ -126,21 +158,22 @@ app.get("/top-holders", async (req, res) => {
     );
 
     res.json({
+      snapshotUpdatedAt,
       holders: result.rows.map((r, idx) => ({
         rank: idx + 1,
         addressId: r.address_id,
         address: r.address,
         balanceBc400: r.balance_bc400,
         balanceRaw: r.balance_raw,
-        txCount: r.tx_count,
-        tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
         firstSeen: r.first_seen,
         lastSeen: r.last_seen,
+        txCount: r.tx_count,
         lastBlockNumber: r.last_block_number
           ? Number(r.last_block_number)
           : null,
         lastBlockTime: r.last_block_time,
         lastTxHash: r.last_tx_hash,
+        tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
       })),
     });
   } catch (err) {
@@ -161,14 +194,16 @@ app.get("/transfers", async (req, res) => {
       500,
     );
 
-    const result = await client.query<{
-      block_number: string;
-      block_time: string;
-      tx_hash: string;
-      from_address: string | null;
-      to_address: string | null;
-      raw_amount: string;
-    }>(
+    const result = await client.query<
+      {
+        block_number: string;
+        block_time: string;
+        tx_hash: string;
+        from_address: string | null;
+        to_address: string | null;
+        raw_amount: string;
+      }
+    >(
       `
       SELECT
         t.block_number,
@@ -211,6 +246,7 @@ app.post("/sql", async (req, res) => {
   try {
     const sql = String(req.body?.sql || "").trim();
 
+    // Very basic safety: allow SELECT only
     if (!sql.toLowerCase().startsWith("select")) {
       return res
         .status(400)
