@@ -25,3 +25,8 @@ backend/pgdata/
 # env files
 .env
 .env.local
+**/.DS_Store
+**/node_modules
+frontend/dist
+backend/dist
+backend/pgdata
