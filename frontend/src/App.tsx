@@ -64,55 +64,22 @@ function formatDateTime(iso: string | null): string {
 
 function normalizeHolder(raw: any, index: number): Holder {
   return {
-    rank:
-      raw.rank ??
-      raw.position ??
-      raw.index ??
-      index + 1,
+    rank: raw.rank ?? raw.position ?? raw.index ?? index + 1,
     address: raw.address ?? raw.wallet ?? "",
-    balance_bc400:
-      raw.balance_bc400 ??
-      raw.balance ??
-      raw.balanceRaw ??
-      "0",
-    tx_count:
-      raw.tx_count ??
-      raw.txCount ??
-      raw.transferCount ??
-      0,
-    first_seen:
-      raw.first_seen ??
-      raw.firstSeen ??
-      null,
-    last_seen:
-      raw.last_seen ??
-      raw.lastSeen ??
-      null,
+    balance_bc400: raw.balance_bc400 ?? raw.balance ?? raw.balanceRaw ?? "0",
+    tx_count: raw.tx_count ?? raw.txCount ?? raw.transferCount ?? 0,
+    first_seen: raw.first_seen ?? raw.firstSeen ?? null,
+    last_seen: raw.last_seen ?? raw.lastSeen ?? null,
   };
 }
 
 function normalizeTransfer(raw: any): Transfer {
   return {
-    block_number:
-      raw.block_number ??
-      raw.blockNumber ??
-      0,
-    block_time:
-      raw.block_time ??
-      raw.blockTime ??
-      raw.time ??
-      null,
-    from_address:
-      raw.from_address ??
-      raw.fromAddress ??
-      raw.from ??
-      "",
-    to_address:
-      raw.to_address ??
-      raw.toAddress ??
-      raw.to ??
-      "",
-    // 🔥 KEY CHANGE: look at raw_amount/rawAmount as well
+    block_number: raw.block_number ?? raw.blockNumber ?? 0,
+    block_time: raw.block_time ?? raw.blockTime ?? raw.time ?? null,
+    from_address: raw.from_address ?? raw.fromAddress ?? raw.from ?? "",
+    to_address: raw.to_address ?? raw.toAddress ?? raw.to ?? "",
+    // look at raw_amount/rawAmount as well
     amount_bc400:
       raw.amount_bc400 ??
       raw.amount ??
@@ -141,7 +108,7 @@ export default function App() {
             fetch(`${API_BASE}/transfers`),
           ]);
 
-        // Health
+        // Health (API)
         if (healthRes.ok) {
           const h = await healthRes.json();
           setHealthOk(true);
@@ -151,7 +118,7 @@ export default function App() {
           setHealthMessage(`HTTP ${healthRes.status}`);
         }
 
-        // Summary
+        // Summary (indexer)
         if (summaryRes.ok) {
           const s = await summaryRes.json();
           setSummary(s);
@@ -203,6 +170,10 @@ export default function App() {
   const top20 = holders.slice(0, 20);
   const last20Transfers = transfers.slice(0, 20);
 
+  // Derived status flags for the SYSTEM HEALTH card
+  const indexerOnline = !!summary;
+  const apiOnline = healthOk;
+
   return (
     <div className="app-root">
       <div className="app-shell">
@@ -213,24 +184,21 @@ export default function App() {
               Live on-chain activity &amp; security intel for BC400 holders.
             </p>
           </div>
-          <div className="indexer-pill">
-            <span className="indexer-dot" />
-            Indexer Online
-          </div>
+          {/* right side currently empty – indexer pill moved into System Health */}
         </header>
 
-        {/* Index + backend health */}
+        {/* Index + system health */}
         <section className="panel panel--status">
-          <div className="panel-block">
-            <h2 className="panel-title">Index Status</h2>
+          <div className="panel-block panel-block--index">
+            <h2 className="panel-title panel-title--index">BC400 Status</h2>
             {summary ? (
-              <dl className="stats-grid">
+              <dl className="stats-grid stats-grid--hero">
                 <div>
                   <dt>First Block</dt>
                   <dd>{formatNumber(summary.firstBlock)}</dd>
                 </div>
                 <div>
-                  <dt>Last Indexed Block</dt>
+                  <dt>Last Indexed </dt>
                   <dd>{formatNumber(summary.lastIndexedBlock)}</dd>
                 </div>
                 <div>
@@ -248,11 +216,32 @@ export default function App() {
           </div>
 
           <div className="panel-block panel-block--health">
-            <h2 className="panel-title">Backend Health</h2>
-            <p className="panel-label">API base: {API_BASE}</p>
-            <p className={healthOk ? "health-ok" : "health-bad"}>
-              {healthMessage}
-            </p>
+            <h2 className="panel-title panel-title--system">SYSTEM HEALTH</h2>
+            <div className="health-status-row">
+              <span className="health-label">Indexer:</span>
+              <span
+                className={
+                  indexerOnline
+                    ? "health-value health-value--ok"
+                    : "health-value health-value--bad"
+                }
+              >
+                {indexerOnline ? "Online" : "Offline"}
+              </span>
+
+              <span className="health-label health-label--spacer">
+                API Base:
+              </span>
+              <span
+                className={
+                  apiOnline
+                    ? "health-value health-value--ok"
+                    : "health-value health-value--bad"
+                }
+              >
+                {apiOnline ? "Online" : "Offline"}
+              </span>
+            </div>
           </div>
         </section>
 
