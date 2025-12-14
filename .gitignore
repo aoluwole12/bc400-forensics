@@ -15,3 +15,13 @@ dist
 # node build output
 **/dist
 **/node_modules
+
+# mac junk
+.DS_Store
+
+# local postgres data (DO NOT COMMIT)
+backend/pgdata/
+
+# env files
+.env
+.env.local
