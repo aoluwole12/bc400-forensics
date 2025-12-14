@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import "./index.css";
+import { Header } from "./components/Header";
 
 type Summary = {
   firstBlock: number;
@@ -33,7 +34,6 @@ function formatNumber(value: string | number | null | undefined): string {
 
   const str = String(value);
 
-  // If it's all digits, add commas manually so we don't overflow Number
   if (/^\d+$/.test(str)) {
     return str.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   }
@@ -60,14 +60,16 @@ function formatDateTime(iso: string | null): string {
   });
 }
 
-// -------- Normalizers: adapt whatever the backend sends --------
+// -------- Normalizers --------
 
 function normalizeHolder(raw: any, index: number): Holder {
   return {
     rank: raw.rank ?? raw.position ?? raw.index ?? index + 1,
     address: raw.address ?? raw.wallet ?? "",
-    balance_bc400: raw.balance_bc400 ?? raw.balance ?? raw.balanceRaw ?? "0",
-    tx_count: raw.tx_count ?? raw.txCount ?? raw.transferCount ?? 0,
+    balance_bc400:
+      raw.balance_bc400 ?? raw.balance ?? raw.balanceRaw ?? "0",
+    tx_count:
+      raw.tx_count ?? raw.txCount ?? raw.transferCount ?? 0,
     first_seen: raw.first_seen ?? raw.firstSeen ?? null,
     last_seen: raw.last_seen ?? raw.lastSeen ?? null,
   };
@@ -79,7 +81,6 @@ function normalizeTransfer(raw: any): Transfer {
     block_time: raw.block_time ?? raw.blockTime ?? raw.time ?? null,
     from_address: raw.from_address ?? raw.fromAddress ?? raw.from ?? "",
     to_address: raw.to_address ?? raw.toAddress ?? raw.to ?? "",
-    // look at raw_amount/rawAmount as well
     amount_bc400:
       raw.amount_bc400 ??
       raw.amount ??
@@ -94,8 +95,7 @@ export default function App() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [holders, setHolders] = useState<Holder[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
-  const [healthMessage, setHealthMessage] = useState<string>("Checking...");
-  const [healthOk, setHealthOk] = useState<boolean>(false);
+  const [systemOnline, setSystemOnline] = useState<boolean>(false);
 
   useEffect(() => {
     async function load() {
@@ -108,59 +108,44 @@ export default function App() {
             fetch(`${API_BASE}/transfers`),
           ]);
 
-        // Health (API)
+        // Health: treat indexer + API as one system flag for now
         if (healthRes.ok) {
-          const h = await healthRes.json();
-          setHealthOk(true);
-          setHealthMessage(h.status || "Connected to backend successfully.");
+          setSystemOnline(true);
         } else {
-          setHealthOk(false);
-          setHealthMessage(`HTTP ${healthRes.status}`);
+          setSystemOnline(false);
         }
 
-        // Summary (indexer)
         if (summaryRes.ok) {
           const s = await summaryRes.json();
           setSummary(s);
         }
 
-        // Top holders – array or {holders: [...]} or {items: [...]}
         if (holdersRes.ok) {
           const data = await holdersRes.json();
           let raw: any[] = [];
 
-          if (Array.isArray(data)) {
-            raw = data;
-          } else if (Array.isArray(data.holders)) {
-            raw = data.holders;
-          } else if (Array.isArray(data.items)) {
-            raw = data.items;
-          }
+          if (Array.isArray(data)) raw = data;
+          else if (Array.isArray(data.holders)) raw = data.holders;
+          else if (Array.isArray(data.items)) raw = data.items;
 
           const normalized = raw.map((h, idx) => normalizeHolder(h, idx));
           setHolders(normalized);
         }
 
-        // Transfers – array or {transfers: [...]} or {items: [...]}
         if (transfersRes.ok) {
           const data = await transfersRes.json();
           let raw: any[] = [];
 
-          if (Array.isArray(data)) {
-            raw = data;
-          } else if (Array.isArray(data.transfers)) {
-            raw = data.transfers;
-          } else if (Array.isArray(data.items)) {
-            raw = data.items;
-          }
+          if (Array.isArray(data)) raw = data;
+          else if (Array.isArray(data.transfers)) raw = data.transfers;
+          else if (Array.isArray(data.items)) raw = data.items;
 
           const normalized = raw.map((t) => normalizeTransfer(t));
           setTransfers(normalized);
         }
       } catch (err) {
         console.error("Failed to load dashboard data:", err);
-        setHealthOk(false);
-        setHealthMessage("Failed to reach backend.");
+        setSystemOnline(false);
       }
     }
 
@@ -170,35 +155,23 @@ export default function App() {
   const top20 = holders.slice(0, 20);
   const last20Transfers = transfers.slice(0, 20);
 
-  // Derived status flags for the SYSTEM HEALTH card
-  const indexerOnline = !!summary;
-  const apiOnline = healthOk;
-
   return (
     <div className="app-root">
       <div className="app-shell">
-        <header className="app-header">
-          <div>
-            <h1 className="app-title">#BC400 FORENSICS</h1>
-            <p className="app-subtitle">
-              Live on-chain activity &amp; security intel for BC400 holders.
-            </p>
-          </div>
-          {/* right side currently empty – indexer pill moved into System Health */}
-        </header>
+        <Header />
 
-        {/* Index + system health */}
+        {/* Index + System Health */}
         <section className="panel panel--status">
-          <div className="panel-block panel-block--index">
-            <h2 className="panel-title panel-title--index">BC400 Status</h2>
+          <div className="panel-block">
+            <h2 className="panel-title panel-title--index">Index Status</h2>
             {summary ? (
-              <dl className="stats-grid stats-grid--hero">
+              <dl className="stats-grid">
                 <div>
                   <dt>First Block</dt>
                   <dd>{formatNumber(summary.firstBlock)}</dd>
                 </div>
                 <div>
-                  <dt>Last Indexed </dt>
+                  <dt>Last Indexed Block</dt>
                   <dd>{formatNumber(summary.lastIndexedBlock)}</dd>
                 </div>
                 <div>
@@ -216,30 +189,30 @@ export default function App() {
           </div>
 
           <div className="panel-block panel-block--health">
-            <h2 className="panel-title panel-title--system">SYSTEM HEALTH</h2>
-            <div className="health-status-row">
-              <span className="health-label">Indexer:</span>
+            <h2 className="panel-title panel-title--system">System Health</h2>
+            <div className="system-health-row">
+              <span className="system-label">Indexer:</span>
               <span
                 className={
-                  indexerOnline
-                    ? "health-value health-value--ok"
-                    : "health-value health-value--bad"
+                  systemOnline
+                    ? "system-value system-value--ok"
+                    : "system-value system-value--bad"
                 }
               >
-                {indexerOnline ? "Online" : "Offline"}
+                {systemOnline ? "Online" : "Offline"}
               </span>
 
-              <span className="health-label health-label--spacer">
+              <span className="system-label system-label--spacer">
                 API Base:
               </span>
               <span
                 className={
-                  apiOnline
-                    ? "health-value health-value--ok"
-                    : "health-value health-value--bad"
+                  systemOnline
+                    ? "system-value system-value--ok"
+                    : "system-value system-value--bad"
                 }
               >
-                {apiOnline ? "Online" : "Offline"}
+                {systemOnline ? "Online" : "Offline"}
               </span>
             </div>
           </div>
@@ -343,6 +316,24 @@ export default function App() {
               </table>
             </div>
           )}
+        </section>
+
+        {/* Daily Audit Report – anchor target for menu */}
+        <section
+          id="daily-audit"
+          className="panel panel--table panel--daily-audit"
+        >
+          <div className="panel-header-row">
+            <h2 className="panel-title">Daily Audit Report</h2>
+            <span className="panel-caption">
+              Human-style 24h recap for BC400 – coming soon.
+            </span>
+          </div>
+          <p className="panel-muted">
+            This panel will summarize holders, whales, security alerts and LP
+            status for the last 24 hours. For now, it&apos;s a preview of what&apos;s
+            coming to BC400 Forensics.
+          </p>
         </section>
       </div>
     </div>
