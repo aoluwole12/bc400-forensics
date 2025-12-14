@@ -1,9 +1,11 @@
-// Global BC400 frontend config
+export const API_BASE =
+  import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
 
-// BC400 token contract address
 export const BC400_CONTRACT_ADDRESS =
-  '0x61Fc93c7C070B32B1b1479B86056d8Ec1D7125BD';
+  (import.meta.env.VITE_BC400_CONTRACT_ADDRESS || "").trim();
 
-// Optional: Etherscan (or other explorer) URL for the token
-export const BC400_EXPLORER_URL =
-  \`https://etherscan.io/token/\${BC400_CONTRACT_ADDRESS}\`;
+export const explorerTokenUrl = (contractAddress: string) => {
+  const addr = (contractAddress || "").trim();
+  if (!addr) return "https://bscscan.com/";
+  return `https://bscscan.com/token/${addr}`;
+};
