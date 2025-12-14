@@ -7,11 +7,13 @@
     "dev": "ts-node-dev --respawn --transpile-only src/api.ts",
     "devindexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
     "devbackfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
-    "devserver": "ts-node-dev --respawn --transpile-only src/api.ts",
+
     "build": "tsc",
-    "start": "npm run build && node dist/api.js",
-    "indexer": "npm run build && node dist/indexer.js",
-    "backfill": "npm run build && node dist/backfill.js",
+
+    "start": "node dist/api.js",
+    "indexer": "node dist/indexer.js",
+    "backfill": "node dist/backfill.js",
+
     "rebuild-holders": "psql \"$DATABASE_URL\" -f sql/rebuild_holder_balances.sql"
   },
   "dependencies": {
