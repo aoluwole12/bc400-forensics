@@ -1,209 +1,187 @@
 import "dotenv/config";
 import { ethers, Log } from "ethers";
-import { pool, getOrCreateAddress } from "./db";
+import { pool, getOrCreateAddressId, getMeta, setMeta } from "./db";
+import { provider, callRpc } from "./clients/bscClient";
 
-// ---------- ENV + PROVIDER SETUP ----------
-
-const rpcUrl = process.env.BSC_RPC_URL!;
 const tokenAddress = process.env.BC400_TOKEN_ADDRESS!;
 const startBlockEnv = process.env.BC400_START_BLOCK;
 
-if (!rpcUrl || !tokenAddress) {
-  console.error("Missing BSC_RPC_URL or BC400_TOKEN_ADDRESS in .env");
-  process.exit(1);
-}
+if (!tokenAddress) throw new Error("Missing BC400_TOKEN_ADDRESS in .env");
+if (!startBlockEnv) throw new Error("Missing BC400_START_BLOCK in .env");
 
-const provider = new ethers.JsonRpcProvider(rpcUrl);
+const START_BLOCK = BigInt(startBlockEnv);
 
-const transferTopic = ethers.id("Transfer(address,address,uint256)");
-const iface = new ethers.Interface([
-  "event Transfer(address indexed from, address indexed to, uint256 value)",
-]);
-
-// ---------- HELPERS (shared style with backfill) ----------
+const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 
 function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-// Global RPC wrapper: throttle + retry on rate limits / glitches
-async function callRpc<T>(fn: () => Promise<T>): Promise<T> {
-  while (true) {
-    try {
-      const result = await fn();
-      // Small delay between all RPC calls to be polite
-      await sleep(500);
-      return result;
-    } catch (err: any) {
-      const msg =
-        typeof err?.message === "string"
-          ? err.message
-          : JSON.stringify(err ?? {});
-
-      console.error("RPC error:", msg);
-
-      // Generic rate-limit / transient error handling
-      if (
-        msg.includes("rate limit") ||
-        msg.includes("Too many requests") ||
-        msg.includes("429") ||
-        msg.includes("timeout") ||
-        msg.includes("temporarily unavailable")
-      ) {
-        console.log("Hit RPC limit / temporary issue — waiting 5s then retry…");
-        await sleep(5000);
-        continue;
-      }
-
-      throw err;
-    }
-  }
+function parseTransferLog(log: Log) {
+  const from = "0x" + log.topics[1].slice(26);
+  const to = "0x" + log.topics[2].slice(26);
+  const rawAmount = BigInt(log.data);
+  return { from, to, rawAmount };
 }
 
-// getLogs over a range, using the global throttle
 async function getLogsRange(from: bigint, to: bigint): Promise<Log[]> {
-  return callRpc(() =>
-    provider.getLogs({
-      address: tokenAddress,
-      fromBlock: Number(from),
-      toBlock: Number(to),
-      topics: [transferTopic],
-    })
+  return callRpc(
+    async () =>
+      (await provider.getLogs({
+        address: tokenAddress,
+        topics: [TRANSFER_TOPIC],
+        fromBlock: Number(from),
+        toBlock: Number(to),
+      })) as Log[],
+    `getLogs(${from}-${to})`
   );
 }
 
-// Cache block timestamps so we only call getBlock ONCE per block
-const blockTimestampCache = new Map<number, Date>();
+const blockTimeCache = new Map<number, Date>();
 
-async function getBlockTimestamp(blockNumber: number): Promise<Date> {
-  if (blockTimestampCache.has(blockNumber)) {
-    return blockTimestampCache.get(blockNumber)!;
-  }
+async function getBlockTime(blockNumber: number): Promise<Date> {
+  const cached = blockTimeCache.get(blockNumber);
+  if (cached) return cached;
 
-  const block = await callRpc(() => provider.getBlock(blockNumber));
-  const ts = new Date(Number(block!.timestamp) * 1000);
-  blockTimestampCache.set(blockNumber, ts);
-  return ts;
+  const b = await callRpc(() => provider.getBlock(blockNumber), `getBlock(${blockNumber})`);
+  const t = new Date(Number(b!.timestamp) * 1000);
+  blockTimeCache.set(blockNumber, t);
+  return t;
 }
 
-// ---------- SAVE ONE TRANSFER (same schema as backfill) ----------
+// Determine start position:
+// 1) meta last_indexed_block
+// 2) else MAX(block_number) once
+// 3) else START_BLOCK
+async function resolveStartFromDb(): Promise<bigint> {
+  const meta = await getMeta("last_indexed_block");
+  if (meta) return BigInt(meta) + 1n;
 
-async function saveTransfer(log: Log) {
-  const parsed = iface.parseLog(log);
-  const from = parsed.args[0] as string;
-  const to = parsed.args[1] as string;
-  const value = parsed.args[2] as bigint;
-
-  const blockTime = await getBlockTimestamp(log.blockNumber);
-  const blockNumBig = BigInt(log.blockNumber);
-
-  const fromId = await getOrCreateAddress(from, blockNumBig);
-  const toId = await getOrCreateAddress(to, blockNumBig);
-
-  const rawAmount = value.toString(); // store raw 18-decimals value
-
-  await pool.query(
-    `INSERT INTO transfers (
-      tx_hash,
-      log_index,
-      block_number,
-      block_time,
-      from_address_id,
-      to_address_id,
-      raw_amount
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-    ON CONFLICT DO NOTHING`,
-    [
-      log.transactionHash,
-      log.index,
-      log.blockNumber,
-      blockTime.toISOString(),
-      fromId,
-      toId,
-      rawAmount,
-    ]
-  );
-}
-
-// ---------- READ LAST INDEXED BLOCK FROM DB ----------
-
-async function getLastIndexedBlock(): Promise<bigint | null> {
   const res = await pool.query("SELECT MAX(block_number) AS max FROM transfers");
   const max = res.rows[0]?.max as string | null;
-  if (!max) return null;
-  return BigInt(max);
+  if (max) return BigInt(max) + 1n;
+
+  return START_BLOCK;
 }
 
-// ---------- MAIN LIVE INDEXER LOOP (polling on NodeReal) ----------
+export async function runIndexer() {
+  console.log("🟡 BC400 live indexer starting (optimized)...");
+  console.log("Token:", tokenAddress);
 
-async function runIndexer() {
-  console.log("BC400 live indexer (NodeReal) starting…");
+  let from = await resolveStartFromDb();
+  console.log("Starting at block:", from.toString());
 
-  const latestOnChain = BigInt(await callRpc(() => provider.getBlockNumber()));
-
-  let from: bigint;
-
-  const lastIndexed = await getLastIndexedBlock();
-  if (lastIndexed !== null) {
-    from = lastIndexed + 1n;
-    console.log(
-      `Resuming from DB after block ${lastIndexed} (starting at ${from})`
-    );
-  } else if (startBlockEnv) {
-    from = BigInt(startBlockEnv);
-    console.log(
-      `No previous data. Starting from BC400_START_BLOCK=${from} (env).`
-    );
-  } else {
-    // Safety fallback: start a bit behind latest
-    from = latestOnChain > 10_000n ? latestOnChain - 10_000n : 0n;
-    console.log(
-      `No previous data and no BC400_START_BLOCK. Starting from ${from}.`
-    );
-  }
-
-  // NodeReal can handle larger ranges than your old QuickNode free plan.
-  // 499n => inclusive range of 500 blocks per getLogs call.
-  const batchSize = 499n;
+  // Growth can handle more; keep a reasonable batch
+  let batchSize = BigInt(process.env.INDEXER_BATCH_SIZE || "2000");
 
   while (true) {
-    const latest = BigInt(await callRpc(() => provider.getBlockNumber()));
+    const latest = BigInt(await callRpc(() => provider.getBlockNumber(), "getBlockNumber"));
 
     if (from > latest) {
-      console.log(`Up to date at block ${latest}. Sleeping 15s…`);
-      await sleep(15000);
+      console.log(`Up to date at block ${latest}. Sleeping 12s…`);
+      await sleep(12000);
       continue;
     }
 
-    let to = from + batchSize;
+    let to = from + (batchSize - 1n);
     if (to > latest) to = latest;
 
-    console.log(`Scanning blocks ${from} → ${to} (latest ${latest}) …`);
+    console.log(`Scanning blocks ${from} → ${to} (latest ${latest})`);
 
     let logs: Log[] = [];
     try {
       logs = await getLogsRange(from, to);
     } catch (err) {
-      console.error("Failed to get logs for range", err);
-      // Skip this range so the loop continues
-      from = to + 1n;
+      console.error("getLogs failed; shrinking batch and retrying…", err);
+      // shrink batch to reduce payload/rate pressure, then retry
+      batchSize = batchSize > 200n ? batchSize / 2n : 200n;
+      await sleep(5000);
       continue;
     }
 
     console.log(`  Found ${logs.length} Transfer logs`);
 
-    for (const log of logs) {
+    if (logs.length > 0) {
+      const uniqueBlocks = Array.from(new Set(logs.map((l) => l.blockNumber))).sort((a, b) => a - b);
+      for (const bn of uniqueBlocks) {
+        await getBlockTime(bn);
+      }
+
+      const client = await pool.connect();
       try {
-        await saveTransfer(log);
-      } catch (err) {
-        console.error("Error saving transfer", err);
+        const tx_hash: string[] = [];
+        const log_index: number[] = [];
+        const block_number: string[] = [];
+        const block_time: Date[] = [];
+        const from_id: number[] = [];
+        const to_id: number[] = [];
+        const raw_amount: string[] = [];
+
+        for (const log of logs) {
+          const { from: fa, to: ta, rawAmount } = parseTransferLog(log);
+          const bt = blockTimeCache.get(log.blockNumber)!;
+
+          const faId = await getOrCreateAddressId(fa, client);
+          const taId = await getOrCreateAddressId(ta, client);
+
+          tx_hash.push(log.transactionHash);
+          log_index.push(Number(log.index));
+          block_number.push(String(log.blockNumber));
+          block_time.push(bt);
+          from_id.push(faId);
+          to_id.push(taId);
+          raw_amount.push(rawAmount.toString());
+        }
+
+        const BATCH_ROWS = 500;
+        for (let i = 0; i < tx_hash.length; i += BATCH_ROWS) {
+          const j = Math.min(i + BATCH_ROWS, tx_hash.length);
+
+          await client.query(
+            `
+            INSERT INTO transfers (
+              tx_hash, log_index, block_number, block_time,
+              from_address_id, to_address_id, raw_amount
+            )
+            SELECT *
+            FROM UNNEST(
+              $1::text[],
+              $2::int[],
+              $3::bigint[],
+              $4::timestamptz[],
+              $5::int[],
+              $6::int[],
+              $7::text[]
+            )
+            ON CONFLICT (tx_hash, log_index) DO NOTHING
+            `,
+            [
+              tx_hash.slice(i, j),
+              log_index.slice(i, j),
+              block_number.slice(i, j).map((x) => BigInt(x).toString()),
+              block_time.slice(i, j),
+              from_id.slice(i, j),
+              to_id.slice(i, j),
+              raw_amount.slice(i, j),
+            ]
+          );
+        }
+      } finally {
+        client.release();
       }
     }
 
+    // advance meta and move forward
+    await setMeta("last_indexed_block", to.toString());
     from = to + 1n;
+
+    // If we shrank earlier and things are stable, gently grow back up
+    const target = BigInt(process.env.INDEXER_BATCH_SIZE || "2000");
+    if (batchSize < target) batchSize = BigInt(Math.min(Number(target), Number(batchSize) * 2));
   }
 }
 
+// run as script
 runIndexer().catch((err) => {
   console.error("Indexer crashed:", err);
   process.exit(1);

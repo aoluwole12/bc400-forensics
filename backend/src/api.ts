@@ -1,15 +1,9 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import { Pool } from "pg";
+import { pool } from "./db";
 
 const PORT = Number(process.env.PORT || 4000);
-
-// Use DATABASE_URL on Render, otherwise local docker Postgres
-const pool = new Pool({
-  connectionString:
-    process.env.DATABASE_URL ||
-    "postgres://bc400:bc400password@localhost:5432/bc400_forensics",
-});
 
 const app = express();
 app.use(cors());
@@ -25,9 +19,9 @@ function handleError(res: express.Response, where: string, err: unknown) {
 }
 
 // ----------------------
-// Health check
+// Health check (support both /health and /api/health)
 // ----------------------
-app.get("/health", async (_req, res) => {
+async function healthHandler(_req: express.Request, res: express.Response) {
   try {
     const client = await pool.connect();
     client.release();
@@ -35,12 +29,14 @@ app.get("/health", async (_req, res) => {
   } catch (err) {
     handleError(res, "health", err);
   }
-});
+}
+app.get("/health", healthHandler);
+app.get("/api/health", healthHandler);
 
 // ----------------------
-// /summary – chain snapshot
+// /summary – chain snapshot (support /api/summary too)
 // ----------------------
-app.get("/summary", async (_req, res) => {
+async function summaryHandler(_req: express.Request, res: express.Response) {
   const client = await pool.connect();
   try {
     const stats = await client.query<{
@@ -52,42 +48,39 @@ app.get("/summary", async (_req, res) => {
       SELECT
         MIN(block_number)::bigint AS first_block,
         MAX(block_number)::bigint AS last_block,
-        COUNT(*)::bigint       AS total_transfers
+        COUNT(*)::bigint          AS total_transfers
       FROM transfers;
-    `,
+      `
     );
 
     const row = stats.rows[0];
 
     const wallets = await client.query<{ total_wallets: string }>(
-      `SELECT COUNT(*)::bigint AS total_wallets FROM addresses;`,
+      `SELECT COUNT(*)::bigint AS total_wallets FROM addresses;`
     );
 
     res.json({
       firstBlock: row?.first_block ? Number(row.first_block) : null,
       lastIndexedBlock: row?.last_block ? Number(row.last_block) : null,
       totalTransfers: row ? Number(row.total_transfers) : 0,
-      totalWallets: wallets.rows[0]
-        ? Number(wallets.rows[0].total_wallets)
-        : 0,
+      totalWallets: wallets.rows[0] ? Number(wallets.rows[0].total_wallets) : 0,
     });
   } catch (err) {
     handleError(res, "summary", err);
   } finally {
     client.release();
   }
-});
+}
+app.get("/summary", summaryHandler);
+app.get("/api/summary", summaryHandler);
 
 // ----------------------
-// /top-holders – from holder_balances snapshot
+// /top-holders – from holder_balances snapshot (support /api/top-holders too)
 // ----------------------
-app.get("/top-holders", async (req, res) => {
+async function topHoldersHandler(req: express.Request, res: express.Response) {
   const client = await pool.connect();
   try {
-    const limit = Math.min(
-      Math.max(Number(req.query.limit) || 25, 1),
-      200,
-    );
+    const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 200);
 
     const result = await client.query<{
       address_id: number;
@@ -121,8 +114,8 @@ app.get("/top-holders", async (req, res) => {
       WHERE hb.balance_bc400 > 0
       ORDER BY hb.balance_bc400 DESC
       LIMIT $1;
-    `,
-      [limit],
+      `,
+      [limit]
     );
 
     res.json({
@@ -136,9 +129,7 @@ app.get("/top-holders", async (req, res) => {
         tags: r.tags ? r.tags.split(",").filter(Boolean) : [],
         firstSeen: r.first_seen,
         lastSeen: r.last_seen,
-        lastBlockNumber: r.last_block_number
-          ? Number(r.last_block_number)
-          : null,
+        lastBlockNumber: r.last_block_number ? Number(r.last_block_number) : null,
         lastBlockTime: r.last_block_time,
         lastTxHash: r.last_tx_hash,
       })),
@@ -148,26 +139,26 @@ app.get("/top-holders", async (req, res) => {
   } finally {
     client.release();
   }
-});
+}
+app.get("/top-holders", topHoldersHandler);
+app.get("/api/top-holders", topHoldersHandler);
 
 // ----------------------
-// /transfers – recent transfers
+// /transfers – recent transfers (support /api/transfers too)
 // ----------------------
-app.get("/transfers", async (req, res) => {
+async function transfersHandler(req: express.Request, res: express.Response) {
   const client = await pool.connect();
   try {
-    const limit = Math.min(
-      Math.max(Number(req.query.limit) || 50, 1),
-      500,
-    );
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
 
     const result = await client.query<{
       block_number: string;
-      block_time: string;
+      block_time: string | null;
       tx_hash: string;
       from_address: string | null;
       to_address: string | null;
       raw_amount: string;
+      log_index: number;
     }>(
       `
       SELECT
@@ -176,24 +167,28 @@ app.get("/transfers", async (req, res) => {
         t.tx_hash,
         af.address AS from_address,
         at.address AS to_address,
-        t.raw_amount
+        t.raw_amount,
+        t.log_index
       FROM transfers t
       LEFT JOIN addresses af ON af.id = t.from_address_id
       LEFT JOIN addresses at ON at.id = t.to_address_id
       ORDER BY t.block_number DESC, t.log_index DESC
       LIMIT $1;
-    `,
-      [limit],
+      `,
+      [limit]
     );
 
+    // Return BOTH shapes for compatibility:
+    // - Your frontend normalizer accepts many keys
+    // - Keep "transfers" wrapper like you already had
     res.json({
       transfers: result.rows.map((r) => ({
-        blockNumber: Number(r.block_number),
-        blockTime: r.block_time,
-        txHash: r.tx_hash,
-        fromAddress: r.from_address,
-        toAddress: r.to_address,
-        rawAmount: r.raw_amount,
+        block_number: Number(r.block_number),
+        block_time: r.block_time,
+        tx_hash: r.tx_hash,
+        from_address: r.from_address,
+        to_address: r.to_address,
+        raw_amount: r.raw_amount,
       })),
     });
   } catch (err) {
@@ -201,7 +196,9 @@ app.get("/transfers", async (req, res) => {
   } finally {
     client.release();
   }
-});
+}
+app.get("/transfers", transfersHandler);
+app.get("/api/transfers", transfersHandler);
 
 // ----------------------
 // /sql – simple SELECT-only console
@@ -210,11 +207,8 @@ app.post("/sql", async (req, res) => {
   const client = await pool.connect();
   try {
     const sql = String(req.body?.sql || "").trim();
-
     if (!sql.toLowerCase().startsWith("select")) {
-      return res
-        .status(400)
-        .json({ error: "Only SELECT queries are allowed" });
+      return res.status(400).json({ error: "Only SELECT queries are allowed" });
     }
 
     const result = await client.query(sql);

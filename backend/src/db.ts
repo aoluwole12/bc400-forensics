@@ -14,55 +14,98 @@ export const pool = new Pool({
     : undefined,
 });
 
+// -------- meta helpers (single source of truth for progress) --------
+export async function getMeta(key: string, client?: PoolClient): Promise<string | null> {
+  const c = client ?? (await pool.connect());
+  const releaseAfter = !client;
+  try {
+    const res = await c.query("SELECT value FROM meta WHERE key = $1", [key]);
+    return res.rowCount ? (res.rows[0].value as string) : null;
+  } finally {
+    if (releaseAfter) c.release();
+  }
+}
+
+export async function setMeta(key: string, value: string, client?: PoolClient): Promise<void> {
+  const c = client ?? (await pool.connect());
+  const releaseAfter = !client;
+  try {
+    await c.query(
+      `
+      INSERT INTO meta (key, value)
+      VALUES ($1, $2)
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+      `,
+      [key, value]
+    );
+  } finally {
+    if (releaseAfter) c.release();
+  }
+}
+
+// -------- address id cache (cuts DB reads a LOT) --------
+const addressIdCache = new Map<string, number>();
+
+export async function getOrCreateAddressId(
+  address: string,
+  client: PoolClient
+): Promise<number> {
+  const lower = address.toLowerCase();
+
+  const cached = addressIdCache.get(lower);
+  if (cached) return cached;
+
+  // 1) try fast select
+  const existing = await client.query("SELECT id FROM addresses WHERE address = $1", [lower]);
+  if (existing.rowCount) {
+    const id = existing.rows[0].id as number;
+    addressIdCache.set(lower, id);
+    return id;
+  }
+
+  // 2) insert (safe if another worker inserts same address)
+  const inserted = await client.query(
+    `
+    INSERT INTO addresses (address)
+    VALUES ($1)
+    ON CONFLICT (address) DO NOTHING
+    RETURNING id
+    `,
+    [lower]
+  );
+
+  if (inserted.rowCount) {
+    const id = inserted.rows[0].id as number;
+    addressIdCache.set(lower, id);
+    return id;
+  }
+
+  // 3) someone else inserted; select again
+  const again = await client.query("SELECT id FROM addresses WHERE address = $1", [lower]);
+  if (!again.rowCount) throw new Error("Failed to getOrCreateAddressId for " + lower);
+
+  const id = again.rows[0].id as number;
+  addressIdCache.set(lower, id);
+  return id;
+}
+
 /**
- * getOrCreateAddress
- *
- *  - backfill style:  getOrCreateAddress(address, client: PoolClient)
- *  - indexer style:   getOrCreateAddress(address, firstSeenBlock: bigint | undefined)
- *
- * If the second argument is a real PoolClient (has .query), we use it.
- * Otherwise we ignore it and create our own client from the pool.
+ * Backwards-compat wrapper (so older code doesn’t crash).
+ * - if passed a PoolClient -> use it
+ * - otherwise it creates its own client (slower, but safe)
  */
 export async function getOrCreateAddress(
   address: string,
   clientOrSomething?: PoolClient | bigint
 ): Promise<number> {
-  const lower = address.toLowerCase();
-
-  let localClient: PoolClient;
-  let releaseAfter = false;
-
-  if (
-    clientOrSomething &&
-    typeof (clientOrSomething as any).query === "function"
-  ) {
-    // Backfill passed a real client
-    localClient = clientOrSomething as PoolClient;
-  } else {
-    // Indexer or generic call – create our own client
-    localClient = await pool.connect();
-    releaseAfter = true;
+  if (clientOrSomething && typeof (clientOrSomething as any).query === "function") {
+    return getOrCreateAddressId(address, clientOrSomething as PoolClient);
   }
 
+  const c = await pool.connect();
   try {
-    const existing = await localClient.query(
-      "SELECT id FROM addresses WHERE address = $1",
-      [lower]
-    );
-
-    if (existing.rowCount > 0) {
-      return existing.rows[0].id as number;
-    }
-
-    const inserted = await localClient.query(
-      "INSERT INTO addresses (address) VALUES ($1) RETURNING id",
-      [lower]
-    );
-
-    return inserted.rows[0].id as number;
+    return await getOrCreateAddressId(address, c);
   } finally {
-    if (releaseAfter && localClient) {
-      localClient.release();
-    }
+    c.release();
   }
 }
