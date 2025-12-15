@@ -30,3 +30,4 @@ backend/pgdata/
 frontend/dist
 backend/dist
 backend/pgdata
+*.bk
