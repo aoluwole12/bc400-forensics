@@ -1,131 +1,59 @@
 import React, { useEffect, useMemo, useState } from "react";
 import "../index.css";
 import { Header } from "../components/Header";
-import { useNavigate } from "react-router-dom";
 
-// Prefer VITE_API_BASE_URL, fallback to localhost backend.
-// Trim trailing slash to avoid //daily-report
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:4000").replace(/\/+$/, "");
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
 
 type DailyReport = {
-  generatedAt: string; // ISO string
-  security?: {
-    criticalAlerts?: boolean;
-  };
-  whales?: {
-    net_bc400?: number;
-    window_hours?: number;
-  };
-  holders?: {
-    total_now?: number;
-    new_24h?: number;
-    pct_change_24h?: number | null;
-  };
-  liquidity?: {
-    lock_percent?: number;
-    changed_24h?: boolean;
-  };
-  // allow backend to add more fields later without breaking
-  [key: string]: any;
+  generatedAt: string;
+  security: { criticalAlerts: boolean };
+  whales: { net_bc400: number; window_hours: number };
+  holders: { total_now: number; new_24h: number; pct_change_24h: number | null };
+  liquidity: { lock_percent: number; changed_24h: boolean };
 };
 
-type LoadState =
-  | { status: "idle" | "loading" }
-  | { status: "loaded"; report: DailyReport }
-  | { status: "error"; message: string; details?: string };
-
-function formatSignedCompact(value: number): string {
+function formatSignedMillions(value: number): string {
   if (!Number.isFinite(value) || value === 0) return "0";
   const sign = value > 0 ? "+" : "−";
   const abs = Math.abs(value);
-
-  // compact formatting for large numbers
-  if (abs >= 1_000_000_000) return `${sign}${(abs / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(1)}K`;
+  if (abs >= 1_000_000) {
+    const millions = abs / 1_000_000;
+    return `${sign}${millions.toLocaleString(undefined, { maximumFractionDigits: 1 })}M`;
+  }
   return `${sign}${abs.toLocaleString()}`;
 }
 
-async function fetchWithTimeout(input: RequestInfo, init: RequestInit = {}, timeoutMs = 12000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
+export const DailyAuditPage: React.FC = () => {
+  const [report, setReport] = useState<DailyReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  try {
-    const res = await fetch(input, { ...init, signal: controller.signal });
-    return res;
-  } finally {
-    clearTimeout(id);
-  }
-}
+  useEffect(() => {
+    let cancelled = false;
 
-export const DailyAudit: React.FC = () => {
-  const navigate = useNavigate();
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
 
-  const [state, setState] = useState<LoadState>({ status: "idle" });
-  const [refreshTick, setRefreshTick] = useState(0);
+        const res = await fetch(`${API_BASE}/daily-report`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-  // Optional: set to true if you want it to refresh automatically
-  const AUTO_REFRESH = false;
-  const AUTO_REFRESH_MS = 60_000;
-
-  const endpoint = useMemo(() => `${API_BASE}/daily-report`, []);
-
-  async function loadDailyReport() {
-    setState({ status: "loading" });
-
-    try {
-      const res = await fetchWithTimeout(endpoint, { method: "GET" });
-
-      if (!res.ok) {
-        // Try to capture error body (if JSON)
-        let bodyText = "";
-        try {
-          bodyText = await res.text();
-        } catch {
-          bodyText = "";
-        }
-        throw new Error(`HTTP ${res.status} ${res.statusText}${bodyText ? ` — ${bodyText}` : ""}`);
+        const data = (await res.json()) as DailyReport;
+        if (!cancelled) setReport(data);
+      } catch (e) {
+        console.error(e);
+        if (!cancelled) setError("Could not load live daily audit data.");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-
-      const data = (await res.json()) as DailyReport;
-
-      // Minimal sanity checks
-      if (!data || typeof data.generatedAt !== "string") {
-        throw new Error("Invalid daily-report payload (missing generatedAt).");
-      }
-
-      setState({ status: "loaded", report: data });
-    } catch (err: any) {
-      const isAbort = err?.name === "AbortError";
-      setState({
-        status: "error",
-        message: isAbort ? "Request timed out. Check API_BASE and backend status." : "Could not load live audit data.",
-        details: err instanceof Error ? err.message : String(err),
-      });
     }
-  }
 
-  useEffect(() => {
-    let alive = true;
-
-    (async () => {
-      if (!alive) return;
-      await loadDailyReport();
-    })();
-
+    load();
     return () => {
-      alive = false;
+      cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshTick]);
-
-  useEffect(() => {
-    if (!AUTO_REFRESH) return;
-    const id = setInterval(() => setRefreshTick((t) => t + 1), AUTO_REFRESH_MS);
-    return () => clearInterval(id);
-  }, [AUTO_REFRESH]);
-
-  const report = state.status === "loaded" ? state.report : null;
+  }, []);
 
   const generatedAt = useMemo(() => {
     if (!report?.generatedAt) return null;
@@ -137,20 +65,11 @@ export const DailyAudit: React.FC = () => {
       day: "numeric",
       hour: "numeric",
       minute: "2-digit",
+      second: "2-digit",
     });
   }, [report?.generatedAt]);
 
-  const criticalAlerts = report?.security?.criticalAlerts ?? false;
-
-  const whalesNet = report?.whales?.net_bc400 ?? 0;
-  const whaleWindowHours = report?.whales?.window_hours ?? 24;
-
-  const holderTotal = report?.holders?.total_now ?? 0;
-  const holderNew = report?.holders?.new_24h ?? 0;
-  const holderPct = report?.holders?.pct_change_24h ?? null;
-
-  const lpLockPercent = report?.liquidity?.lock_percent ?? 0;
-  const lpChanged = report?.liquidity?.changed_24h ?? false;
+  const noCritical = report ? !report.security.criticalAlerts : true;
 
   return (
     <div className="app-root">
@@ -161,46 +80,19 @@ export const DailyAudit: React.FC = () => {
           <div className="audit-header">
             <div>
               <h2 className="audit-title">Daily BC400 Audit Report</h2>
-              <p className="audit-subtitle">
-                Human-style 24h recap for BC400 — generated from live indexer data.
-              </p>
-              <p className="audit-subtitle" style={{ opacity: 0.85 }}>
-                Source: <span style={{ fontFamily: "monospace" }}>{endpoint}</span>
-              </p>
+              <p className="audit-subtitle">Auto-generated recap using live indexer data.</p>
             </div>
 
             <div className="audit-meta">
-              <button type="button" className="audit-back-button" onClick={() => navigate("/")}>
-                ← Back to dashboard
-              </button>
-
-              <button
-                type="button"
-                className="audit-back-button"
-                onClick={() => setRefreshTick((t) => t + 1)}
-                style={{ marginLeft: 8 }}
-              >
-                ⟳ Refresh
-              </button>
-
               <span className="audit-label">Report Status</span>
-              <span className={criticalAlerts ? "audit-pill audit-pill--alert" : "audit-pill audit-pill--ok"}>
-                {criticalAlerts ? "Critical alerts detected" : "No critical alerts"}
+              <span className={noCritical ? "audit-pill audit-pill--ok" : "audit-pill audit-pill--alert"}>
+                {noCritical ? "No critical alerts" : "Critical alerts detected"}
               </span>
 
               <span className="audit-timestamp">
-                {state.status === "loading" && "Loading live data..."}
-                {state.status === "error" && (
-                  <>
-                    {state.message}
-                    {state.details ? (
-                      <span style={{ display: "block", opacity: 0.85, fontFamily: "monospace" }}>
-                        {state.details}
-                      </span>
-                    ) : null}
-                  </>
-                )}
-                {state.status === "loaded" && generatedAt && `Last updated: ${generatedAt}`}
+                {loading && "Loading live data..."}
+                {!loading && error && error}
+                {!loading && !error && generatedAt && `Last updated: ${generatedAt}`}
               </span>
             </div>
           </div>
@@ -209,79 +101,61 @@ export const DailyAudit: React.FC = () => {
             <div className="audit-card">
               <h3 className="audit-card-title">Security</h3>
               <p className="audit-card-main">
-                {state.status === "loaded"
-                  ? criticalAlerts
-                    ? "Review required: at least one high-severity alert in the last 24h."
-                    : "No critical alerts in last 24h."
-                  : "Scanning last 24h window for protocol and on-chain alerts..."}
+                {report
+                  ? noCritical
+                    ? "No critical alerts in last 24h."
+                    : "Review required: high-severity alert detected in last 24h."
+                  : "Scanning last 24h window..."}
               </p>
               <p className="audit-card-note">
-                Critical alerts include major exploits, emergency pauses, blacklist events, or high-risk admin actions
-                affecting BC400 infrastructure.
+                This uses /daily-report. We’ll expand this when your real security rules are wired in.
               </p>
             </div>
 
             <div className="audit-card">
               <h3 className="audit-card-title">Whale Activity</h3>
               <p className="audit-card-main">
-                {state.status === "loaded"
-                  ? `Whales net ${formatSignedCompact(whalesNet)} BC400.`
-                  : "Calculating net whale flows across tracked wallets..."}
+                {report ? `Whales net ${formatSignedMillions(report.whales.net_bc400)} BC400.` : "Calculating whale flows..."}
               </p>
               <p className="audit-card-note">
-                Net position change across tracked top holders over the last {whaleWindowHours} hours, using indexed
-                transfer data.
+                Window: {report?.whales.window_hours ?? 24}h. Based on live transfer data in Postgres.
               </p>
             </div>
 
             <div className="audit-card">
               <h3 className="audit-card-title">Holder Growth</h3>
               <p className="audit-card-main">
-                {state.status === "loaded" ? (
+                {report ? (
                   <>
-                    Holder count +{holderNew.toLocaleString()}
-                    {" "}
-                    (
-                    {holderPct !== null && Number.isFinite(holderPct) ? `${holderPct.toFixed(1)}%` : "—"}
-                    ). Total now: {holderTotal.toLocaleString()}.
+                    New holders: +{report.holders.new_24h}{" "}
+                    {report.holders.pct_change_24h !== null ? `(${report.holders.pct_change_24h.toFixed(1)}%)` : "(—)"}.
                   </>
                 ) : (
-                  "Measuring net new BC400 wallets vs. the prior 24h period..."
+                  "Measuring net new wallets..."
                 )}
               </p>
-              <p className="audit-card-note">
-                New holders are wallets that received BC400 for the first time in the last 24 hours (based on indexed
-                first-seen logic).
-              </p>
+              <p className="audit-card-note">New holders = wallets receiving BC400 for the first time in last 24h.</p>
             </div>
 
             <div className="audit-card">
               <h3 className="audit-card-title">Liquidity</h3>
               <p className="audit-card-main">
-                {state.status === "loaded" ? (
-                  lpChanged ? (
-                    <>
-                      LP changed in last 24h; currently {lpLockPercent}% locked.
-                    </>
+                {report ? (
+                  report.liquidity.changed_24h ? (
+                    <>LP changed in last 24h; currently {report.liquidity.lock_percent}% locked.</>
                   ) : (
-                    <>
-                      LP unchanged; remains {lpLockPercent}% locked.
-                    </>
+                    <>LP unchanged; remains {report.liquidity.lock_percent}% locked.</>
                   )
                 ) : (
-                  "Checking LP position, lock status and recent changes..."
+                  "Checking LP status..."
                 )}
               </p>
-              <p className="audit-card-note">
-                This is a live slot for LP lock + LP delta tracking (lock contracts / LP events). If you want, we’ll wire
-                it to on-chain lock contracts next.
-              </p>
+              <p className="audit-card-note">This stays aligned to /daily-report until you plug in lock-contract logic.</p>
             </div>
           </div>
 
           <p className="audit-footer-note">
-            This report reads from the same Postgres-backed indexer that powers your dashboard tables.
-            Next step: we’ll ensure /daily-report is generated from real whale flows, holder delta, and LP events — not placeholders.
+            Source: your live Postgres index (same dataset as Summary / Holders / Transfers).
           </p>
         </section>
       </div>
