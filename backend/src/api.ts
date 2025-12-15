@@ -19,6 +19,46 @@ function handleError(res: express.Response, where: string, err: unknown) {
 }
 
 // ----------------------
+// Root homepage (fixes "Cannot GET /")
+// ----------------------
+app.get("/", (_req, res) => {
+  res.status(200).type("html").send(`
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BC400 Forensics API</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 32px; line-height: 1.5; }
+    code { background: #f3f3f3; padding: 2px 6px; border-radius: 6px; }
+    .card { max-width: 820px; border: 1px solid #e6e6e6; border-radius: 12px; padding: 18px; }
+    ul { margin: 10px 0 0 18px; }
+    a { text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>BC400 Forensics API</h1>
+    <p class="muted">You reached the API service. Try these endpoints:</p>
+    <ul>
+      <li><a href="/health"><code>/health</code></a> (and <a href="/api/health"><code>/api/health</code></a>)</li>
+      <li><a href="/summary"><code>/summary</code></a> (and <a href="/api/summary"><code>/api/summary</code></a>)</li>
+      <li><a href="/top-holders"><code>/top-holders</code></a> (and <a href="/api/top-holders"><code>/api/top-holders</code></a>)</li>
+      <li><a href="/transfers"><code>/transfers</code></a> (and <a href="/api/transfers"><code>/api/transfers</code></a>)</li>
+    </ul>
+    <p class="muted" style="margin-top: 14px;">
+      Note: <code>/sql</code> is POST-only (SELECT-only).
+    </p>
+  </div>
+</body>
+</html>
+  `);
+});
+
+// ----------------------
 // Health check (support both /health and /api/health)
 // ----------------------
 async function healthHandler(_req: express.Request, res: express.Response) {
