@@ -4,7 +4,8 @@ import { useNavigate } from "react-router-dom";
 type SubItem = {
   label: string;
   hint: string;
-  routePath?: string;
+  route?: string;      // ✅ NEW
+  anchorId?: string;
 };
 
 type NavGroup = {
@@ -23,9 +24,7 @@ const NAV_GROUPS: NavGroup[] = [
   },
   {
     label: "Security & Safety",
-    items: [
-      { label: "Proof of Safety Panel", hint: "LP lock, renounce status and safety signals in one view." },
-    ],
+    items: [{ label: "Proof of Safety Panel", hint: "LP lock, renounce status and safety signals in one view." }],
   },
   {
     label: "Security & Alerts",
@@ -44,15 +43,13 @@ const NAV_GROUPS: NavGroup[] = [
       {
         label: "Daily Audit Report",
         hint: "Human-style recap of the last 24h for BC400.",
-        routePath: "/daily-audit",
+        route: "/daily-audit", // ✅ route instead of anchor
       },
     ],
   },
   {
     label: "AI Auditor",
-    items: [
-      { label: "AI Auditor Console", hint: "LLM-powered explanations of on-chain behavior." },
-    ],
+    items: [{ label: "AI Auditor Console", hint: "LLM-powered explanations of on-chain behavior." }],
   },
   {
     label: "Docs",
@@ -68,26 +65,27 @@ export const Header: React.FC = () => {
   const navigate = useNavigate();
 
   const handleClick = (item: SubItem) => {
-    if (item.routePath) {
-      navigate(item.routePath);
+    if (item.route) {
+      navigate(item.route);
       return;
     }
 
-    // “coming soon” feel for now
+    if (item.anchorId) {
+      const el = document.getElementById(item.anchorId);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+    }
+
     window.alert(`${item.label}\n\n${item.hint}\n\nComing soon to BC400 Forensics.`);
   };
 
   return (
     <header className="app-header">
-      <div
-        style={{ cursor: "pointer" }}
-        onClick={() => navigate("/")}
-        title="Back to Dashboard"
-      >
+      <div>
         <h1 className="app-title">#BC400 FORENSICS</h1>
-        <p className="app-subtitle">
-          Live on-chain activity &amp; security intel for BC400 holders.
-        </p>
+        <p className="app-subtitle">Live on-chain activity &amp; security intel for BC400 holders.</p>
       </div>
 
       <nav className="app-nav">

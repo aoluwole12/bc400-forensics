@@ -1,186 +1,388 @@
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "../index.css";
+import { Header } from "../components/Header";
+import { useNavigate } from "react-router-dom";
+import { SignalBadge } from "../components/SignalBadge";
+import { DailyAuditRoadmap } from "../components/DailyAuditRoadmap";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
 
-type DailyReport = {
-  generatedAt: string;
-  security: { criticalAlerts: boolean };
-  whales: { net_bc400: number; window_hours: number };
-  holders: {
-    total_now: number;
-    new_24h: number;
-    pct_change_24h: number | null;
-  };
-  liquidity: { lock_percent: number; changed_24h: boolean };
+type Summary = {
+  firstBlock: number;
+  lastIndexedBlock: number;
+  totalTransfers: number;
+  totalWallets: number;
 };
 
-function formatSignedMillions(value: number): string {
-  if (!Number.isFinite(value) || value === 0) return "0";
-  const sign = value > 0 ? "+" : "−";
-  const abs = Math.abs(value);
+type Holder = {
+  rank: number;
+  address: string;
+  balance_bc400: string;
+};
 
-  if (abs >= 1_000_000) {
-    const millions = abs / 1_000_000;
-    return `${sign}${millions.toLocaleString(undefined, {
-      maximumFractionDigits: 1,
-    })}M`;
-  }
-  return `${sign}${abs.toLocaleString()}`;
+type Transfer = {
+  block_time: string | null;
+  from_address: string;
+  to_address: string;
+  amount_bc400: string | null;
+};
+
+function normalizeHolder(raw: any, index: number): Holder {
+  return {
+    rank: raw.rank ?? raw.position ?? raw.index ?? index + 1,
+    address: raw.address ?? raw.wallet ?? "",
+    balance_bc400: raw.balance_bc400 ?? raw.balance ?? raw.balanceRaw ?? "0",
+  };
 }
 
-export function DailyAuditPage() {
-  const [report, setReport] = useState<DailyReport | null>(null);
+function normalizeTransfer(raw: any): Transfer {
+  return {
+    block_time: raw.block_time ?? raw.blockTime ?? raw.time ?? null,
+    from_address: raw.from_address ?? raw.fromAddress ?? raw.from ?? "",
+    to_address: raw.to_address ?? raw.toAddress ?? raw.to ?? "",
+    amount_bc400:
+      raw.amount_bc400 ??
+      raw.amount ??
+      raw.value ??
+      raw.raw_amount ??
+      raw.rawAmount ??
+      null,
+  };
+}
+
+function n(v: string | number | null | undefined): number {
+  if (v === null || v === undefined) return 0;
+  const x = typeof v === "number" ? v : Number(String(v));
+  return Number.isFinite(x) ? x : 0;
+}
+
+function formatCompact(num: number): string {
+  if (!Number.isFinite(num)) return "-";
+  const abs = Math.abs(num);
+  if (abs >= 1e12) return (num / 1e12).toFixed(2) + "T";
+  if (abs >= 1e9) return (num / 1e9).toFixed(2) + "B";
+  if (abs >= 1e6) return (num / 1e6).toFixed(2) + "M";
+  if (abs >= 1e3) return (num / 1e3).toFixed(2) + "K";
+  return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function formatSigned(num: number): string {
+  if (!Number.isFinite(num)) return "-";
+  const sign = num > 0 ? "+" : num < 0 ? "−" : "";
+  return sign + formatCompact(Math.abs(num));
+}
+
+function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+export const DailyAuditPage: React.FC = () => {
+  const navigate = useNavigate();
+
+  const [healthOk, setHealthOk] = useState(false);
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [holders, setHolders] = useState<Holder[]>([]);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
+
   const [loading, setLoading] = useState(true);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  async function loadAll() {
+    try {
+      setLoading(true);
+      setError(null);
 
-    async function load() {
-      try {
-        setLoading(true);
-        setError(null);
+      const [healthRes, summaryRes, holdersRes, transfersRes] = await Promise.all([
+        fetch(`${API_BASE}/health`),
+        fetch(`${API_BASE}/summary`),
+        fetch(`${API_BASE}/top-holders`),
+        fetch(`${API_BASE}/transfers`),
+      ]);
 
-        const res = await fetch(`${API_BASE}/daily-report`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setHealthOk(healthRes.ok);
 
-        const data = (await res.json()) as DailyReport;
-        if (!cancelled) setReport(data);
-      } catch (e) {
-        console.error("Daily report fetch failed:", e);
-        if (!cancelled) setError("Could not load live daily audit data.");
-      } finally {
-        if (!cancelled) setLoading(false);
+      if (summaryRes.ok) setSummary(await summaryRes.json());
+
+      if (holdersRes.ok) {
+        const data = await holdersRes.json();
+        let raw: any[] = [];
+        if (Array.isArray(data)) raw = data;
+        else if (Array.isArray(data.holders)) raw = data.holders;
+        else if (Array.isArray(data.items)) raw = data.items;
+        setHolders(raw.map((h, i) => normalizeHolder(h, i)));
       }
-    }
 
-    load();
-    return () => {
-      cancelled = true;
-    };
+      if (transfersRes.ok) {
+        const data = await transfersRes.json();
+        let raw: any[] = [];
+        if (Array.isArray(data)) raw = data;
+        else if (Array.isArray(data.transfers)) raw = data.transfers;
+        else if (Array.isArray(data.items)) raw = data.items;
+        setTransfers(raw.map((t) => normalizeTransfer(t)));
+      }
+
+      setLastUpdated(new Date().toISOString());
+    } catch (e) {
+      console.error(e);
+      setError("Could not load live audit data from the API base.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const generatedAt = useMemo(() => {
-    if (!report?.generatedAt) return null;
-    const d = new Date(report.generatedAt);
-    if (Number.isNaN(d.getTime())) return report.generatedAt;
-    return d.toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  }, [report?.generatedAt]);
+  const audit = useMemo(() => {
+    const now = Date.now();
+    const cutoff = now - 24 * 60 * 60 * 1000;
 
-  const noCritical = report ? !report.security.criticalAlerts : true;
+    const transfersWithTime = transfers.filter((t) => t.block_time);
+    const hasTimestamps = transfersWithTime.length > 0;
+
+    const last24h = hasTimestamps
+      ? transfersWithTime.filter((t) => {
+          const ms = new Date(t.block_time as string).getTime();
+          return Number.isFinite(ms) && ms >= cutoff;
+        })
+      : transfers.slice(0, 250); // fallback (still live, but not 24h-true)
+
+    const activeWalletsSet = new Set<string>();
+    let volume24h = 0;
+
+    for (const t of last24h) {
+      if (t.from_address) activeWalletsSet.add(t.from_address.toLowerCase());
+      if (t.to_address) activeWalletsSet.add(t.to_address.toLowerCase());
+      volume24h += n(t.amount_bc400);
+    }
+
+    const top20 = holders.slice(0, 20);
+    const top10 = holders.slice(0, 10);
+
+    const totalTop20 = top20.reduce((acc, h) => acc + n(h.balance_bc400), 0);
+    const totalTop10 = top10.reduce((acc, h) => acc + n(h.balance_bc400), 0);
+
+    const topSet = new Set(top20.map((h) => h.address.toLowerCase()));
+
+    // “Whale flow proxy” = net change involving top holders in last24h:
+    // Inflow: transfers TO top holders
+    // Outflow: transfers FROM top holders
+    let inflow = 0;
+    let outflow = 0;
+
+    for (const t of last24h) {
+      const fromTop = topSet.has((t.from_address || "").toLowerCase());
+      const toTop = topSet.has((t.to_address || "").toLowerCase());
+      const amt = n(t.amount_bc400);
+
+      if (toTop && !fromTop) inflow += amt;
+      if (fromTop && !toTop) outflow += amt;
+    }
+
+    const whaleNet = inflow - outflow;
+
+    // Confidence signals
+    const indexLag = summary ? Math.max(0, summary.lastIndexedBlock - summary.firstBlock) : 0;
+
+    return {
+      hasTimestamps,
+      transfersWindowLabel: hasTimestamps ? "last 24h" : "latest 250 transfers (timestamps missing)",
+      activeWallets24h: activeWalletsSet.size,
+      volume24h,
+      top10Concentration: totalTop20 > 0 ? (totalTop10 / totalTop20) * 100 : null,
+      whaleNet,
+      inflow,
+      outflow,
+      indexLag,
+    };
+  }, [holders, transfers, summary]);
+
+  const reportStatusTone = error
+    ? "bad"
+    : healthOk
+    ? "ok"
+    : "warn";
+
+  const reportStatusText = error
+    ? "API not reachable"
+    : healthOk
+    ? "System reachable (health OK)"
+    : "Health not OK";
+
+  const updatedText = lastUpdated ? fmtTime(lastUpdated) : "-";
 
   return (
-    <section className="panel audit-panel">
-      <div className="audit-header">
-        <div>
-          <h2 className="audit-title">Daily BC400 Audit Report</h2>
-          <p className="audit-subtitle">
-            Auto-generated recap using your live indexer data.
-          </p>
-        </div>
+    <div className="app-root">
+      <div className="app-shell">
+        <Header />
 
-        <div className="audit-meta">
-          <span className="audit-label">Report Status</span>
-          <span
-            className={
-              noCritical
-                ? "audit-pill audit-pill--ok"
-                : "audit-pill audit-pill--alert"
-            }
-          >
-            {noCritical ? "No critical alerts" : "Critical alerts detected"}
-          </span>
+        <section className="panel audit-panel">
+          <div className="audit-topbar">
+            <div className="audit-head">
+              <h2 className="audit-title">Daily BC400 Audit Report</h2>
+              <p className="audit-subtitle">
+                Live recap derived from your existing API: <b>/health</b>, <b>/summary</b>, <b>/top-holders</b>, <b>/transfers</b>
+              </p>
+            </div>
 
-          <span className="audit-timestamp">
-            {loading && "Loading live data..."}
-            {!loading && error && error}
-            {!loading && !error && generatedAt && `Last updated: ${generatedAt}`}
-          </span>
-        </div>
+            <div className="audit-actions">
+              <button type="button" className="audit-btn" onClick={() => navigate("/")}>
+                ← Back to dashboard
+              </button>
+              <button type="button" className="audit-btn audit-btn--primary" onClick={loadAll} disabled={loading}>
+                ⟳ Refresh
+              </button>
+            </div>
+          </div>
+
+          <div className="audit-badges">
+            <SignalBadge
+              label="Report Status"
+              value={loading ? "Loading…" : reportStatusText}
+              tone={reportStatusTone as any}
+              hint="Backed by /health and live API calls."
+            />
+            <SignalBadge
+              label="Last updated"
+              value={loading ? "…" : updatedText}
+              tone="neutral"
+            />
+            <SignalBadge
+              label="Transfers window"
+              value={audit.transfersWindowLabel}
+              tone={audit.hasTimestamps ? "ok" : "warn"}
+              hint={audit.hasTimestamps ? "True 24h window (block_time present)." : "Fallback window used because timestamps are missing."}
+            />
+          </div>
+
+          {error && <div className="audit-error">Error: {error}</div>}
+
+          <div className="audit-hero">
+            <div className="audit-hero-left">
+              <div className="audit-hero-title">Confidence Signals</div>
+              <div className="audit-hero-grid">
+                <div className="audit-metric">
+                  <div className="audit-metric-label">Active wallets</div>
+                  <div className="audit-metric-value">{formatCompact(audit.activeWallets24h)}</div>
+                  <div className="audit-metric-note">Unique wallets seen in {audit.transfersWindowLabel}.</div>
+                </div>
+
+                <div className="audit-metric">
+                  <div className="audit-metric-label">Transfer volume (BC400)</div>
+                  <div className="audit-metric-value">{formatCompact(audit.volume24h)}</div>
+                  <div className="audit-metric-note">Sum of transfer amounts in {audit.transfersWindowLabel}.</div>
+                </div>
+
+                <div className="audit-metric">
+                  <div className="audit-metric-label">Total wallets</div>
+                  <div className="audit-metric-value">{summary ? formatCompact(summary.totalWallets) : "-"}</div>
+                  <div className="audit-metric-note">From /summary (indexed wallets).</div>
+                </div>
+
+                <div className="audit-metric">
+                  <div className="audit-metric-label">Whale net flow (BC400)</div>
+                  <div className="audit-metric-value">{formatSigned(audit.whaleNet)}</div>
+                  <div className="audit-metric-note">
+                    Proxy from last transfers involving top holders (in − out).
+                  </div>
+                </div>
+
+                <div className="audit-metric">
+                  <div className="audit-metric-label">Top-10 concentration</div>
+                  <div className="audit-metric-value">
+                    {audit.top10Concentration === null ? "-" : `${audit.top10Concentration.toFixed(1)}%`}
+                  </div>
+                  <div className="audit-metric-note">Share of top10 vs top20 balances.</div>
+                </div>
+
+                <div className="audit-metric">
+                  <div className="audit-metric-label">Indexer snapshot</div>
+                  <div className="audit-metric-value">
+                    {summary ? `${summary.lastIndexedBlock}` : "-"}
+                  </div>
+                  <div className="audit-metric-note">Last indexed block from /summary.</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="audit-hero-right">
+              <DailyAuditRoadmap />
+            </div>
+          </div>
+
+          <div className="audit-section">
+            <h3 className="audit-section-title">Liquidity</h3>
+            <div className="audit-section-body">
+              <div className="audit-callout audit-callout--warn">
+                <div className="audit-callout-title">LP lock: not yet available from current endpoints</div>
+                <div className="audit-callout-text">
+                  To make this investor-grade, we’ll add on-chain DEX pair detection + locker detection
+                  (PinkLock/Unicrypt/TeamFinance/own lockers) and then show:
+                  <ul className="audit-list">
+                    <li>Pair address + DEX (PancakeSwap v2/v3) + reserves</li>
+                    <li>LP lock %, unlock date(s), and locker contract verification</li>
+                    <li>Alerts on unlocks, liquidity pulls, ownership changes</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="audit-section">
+            <h3 className="audit-section-title">Whale Activity</h3>
+            <div className="audit-section-body">
+              <div className="audit-line">
+                <span className="audit-k">Top holder net flow:</span>
+                <span className="audit-v">{formatSigned(audit.whaleNet)} BC400</span>
+              </div>
+              <div className="audit-line">
+                <span className="audit-k">Inflow to top holders:</span>
+                <span className="audit-v">{formatCompact(audit.inflow)} BC400</span>
+              </div>
+              <div className="audit-line">
+                <span className="audit-k">Outflow from top holders:</span>
+                <span className="audit-v">{formatCompact(audit.outflow)} BC400</span>
+              </div>
+              <div className="audit-muted">
+                Computed from <b>/top-holders</b> (top 20) + <b>/transfers</b> ({audit.transfersWindowLabel}).
+              </div>
+            </div>
+          </div>
+
+          <div className="audit-section">
+            <h3 className="audit-section-title">Holder / Wallet Activity</h3>
+            <div className="audit-section-body">
+              <div className="audit-line">
+                <span className="audit-k">Active wallets:</span>
+                <span className="audit-v">{formatCompact(audit.activeWallets24h)}</span>
+              </div>
+              <div className="audit-line">
+                <span className="audit-k">Total wallets now:</span>
+                <span className="audit-v">{summary ? formatCompact(summary.totalWallets) : "-"}</span>
+              </div>
+              <div className="audit-muted">
+                Investors love trend-lines. Next step is a small backend endpoint that stores daily snapshots so we can chart growth.
+              </div>
+            </div>
+          </div>
+
+          <div className="audit-footer-note">
+            This page is <b>live</b> right now because it uses your existing endpoints only — no new backend route required.
+          </div>
+        </section>
       </div>
-
-      <div className="audit-grid">
-        <div className="audit-card">
-          <h3 className="audit-card-title">Security</h3>
-          <p className="audit-card-main">
-            {report
-              ? noCritical
-                ? "No critical alerts in last 24h."
-                : "Review required: high-severity alert detected in last 24h."
-              : "Scanning last 24h window..."}
-          </p>
-          <p className="audit-card-note">
-            Source: <code>/daily-report</code>. This becomes “real” once your
-            actual security rules are wired in.
-          </p>
-        </div>
-
-        <div className="audit-card">
-          <h3 className="audit-card-title">Whale Activity</h3>
-          <p className="audit-card-main">
-            {report
-              ? `Whales net ${formatSignedMillions(report.whales.net_bc400)} BC400.`
-              : "Calculating whale flows..."}
-          </p>
-          <p className="audit-card-note">
-            Window: {report?.whales.window_hours ?? 24}h, based on live transfers
-            in Postgres.
-          </p>
-        </div>
-
-        <div className="audit-card">
-          <h3 className="audit-card-title">Holder Growth</h3>
-          <p className="audit-card-main">
-            {report ? (
-              <>
-                New holders: +{report.holders.new_24h}{" "}
-                {report.holders.pct_change_24h !== null
-                  ? `(${report.holders.pct_change_24h.toFixed(1)}%)`
-                  : "(—)"}
-                .
-              </>
-            ) : (
-              "Measuring net new wallets..."
-            )}
-          </p>
-          <p className="audit-card-note">
-            New holders = wallets receiving BC400 for the first time in the last
-            24 hours.
-          </p>
-        </div>
-
-        <div className="audit-card">
-          <h3 className="audit-card-title">Liquidity</h3>
-          <p className="audit-card-main">
-            {report ? (
-              report.liquidity.changed_24h ? (
-                <>LP changed in last 24h; currently {report.liquidity.lock_percent}% locked.</>
-              ) : (
-                <>LP unchanged; remains {report.liquidity.lock_percent}% locked.</>
-              )
-            ) : (
-              "Checking LP status..."
-            )}
-          </p>
-          <p className="audit-card-note">
-            Stays aligned to <code>/daily-report</code> until lock-contract logic
-            is connected.
-          </p>
-        </div>
-      </div>
-
-      <p className="audit-footer-note">
-        Source: your live Postgres index (same dataset as Summary / Holders /
-        Transfers).
-      </p>
-    </section>
+    </div>
   );
-}
+};
