@@ -37,3 +37,25 @@ backend/pgdata
 
 .DS_Store
 **/.DS_Store
+
+# macOS
+.DS_Store
+
+# node / build
+**/node_modules
+**/dist
+
+# local env files
+**/.env
+**/.env.local
+
+# backups + editor swap files
+*.bak
+*.bak-*
+*.back
+*.backup
+*.swp
+
+# optional: local db artifacts (only if you don't want them in git)
+backend/*.db
+backend/*dump*.sql
