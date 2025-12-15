@@ -31,3 +31,6 @@ frontend/dist
 backend/dist
 backend/pgdata
 *.bk
+
+.DS_Store
+**/.DS_Store
