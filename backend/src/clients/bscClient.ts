@@ -1,14 +1,23 @@
 import "dotenv/config";
 import { ethers } from "ethers";
 
-const rpcUrl = process.env.BSC_RPC_URL;
-if (!rpcUrl) throw new Error("Missing BSC_RPC_URL in .env");
+// Accept both naming styles (Render + local)
+const rpcUrl =
+  process.env.BSC_RPC_URL ||
+  process.env.RPC_URL;
+
+if (!rpcUrl) {
+  throw new Error("Missing RPC URL. Set BSC_RPC_URL (preferred) or RPC_URL (Render).");
+}
+
+// Optional WS (not used here yet, but supported for later)
+export const wsUrl = process.env.BSC_WS_URL || process.env.WS_URL || undefined;
 
 export const provider = new ethers.JsonRpcProvider(rpcUrl);
 
 // ---------- polite global throttle ----------
 let lastRpcAt = 0;
-const MIN_RPC_GAP_MS = Number(process.env.RPC_MIN_GAP_MS || 120); // Growth can handle this; free plan would be higher.
+const MIN_RPC_GAP_MS = Number(process.env.RPC_MIN_GAP_MS || 120);
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -22,14 +31,17 @@ async function throttle() {
 }
 
 function looksRateLimited(msg: string) {
+  const m = msg.toLowerCase();
   return (
     msg.includes("429") ||
-    msg.toLowerCase().includes("too many requests") ||
-    msg.toLowerCase().includes("rate limit") ||
-    msg.toLowerCase().includes("exceeded maximum retry") ||
-    msg.toLowerCase().includes("temporarily") ||
-    msg.toLowerCase().includes("timeout") ||
-    msg.toLowerCase().includes("server error")
+    m.includes("too many requests") ||
+    m.includes("rate limit") ||
+    m.includes("exceeded maximum retry") ||
+    m.includes("temporarily") ||
+    m.includes("timeout") ||
+    m.includes("server error") ||
+    m.includes("bad gateway") ||
+    m.includes("gateway timeout")
   );
 }
 
@@ -40,6 +52,7 @@ function looksRateLimited(msg: string) {
  */
 export async function callRpc<T>(fn: () => Promise<T>, label = "rpc"): Promise<T> {
   let attempt = 0;
+
   while (true) {
     try {
       await throttle();
