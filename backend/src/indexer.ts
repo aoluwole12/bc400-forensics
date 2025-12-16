@@ -5,13 +5,8 @@ import { callRpc, provider } from "./clients/bscClient";
 import type { PoolClient } from "pg";
 
 // ------------------- Env (supports Render + local) -------------------
-const tokenAddress =
-  process.env.BC400_TOKEN_ADDRESS ||
-  process.env.TOKEN_ADDRESS;
-
-const startBlockEnv =
-  process.env.BC400_START_BLOCK ||
-  process.env.START_BLOCK;
+const tokenAddress = (process.env.BC400_TOKEN_ADDRESS || process.env.TOKEN_ADDRESS || "").toLowerCase();
+const startBlockEnv = process.env.BC400_START_BLOCK || process.env.START_BLOCK;
 
 if (!tokenAddress) throw new Error("Missing token address env. Set BC400_TOKEN_ADDRESS or TOKEN_ADDRESS");
 if (!startBlockEnv) throw new Error("Missing start block env. Set BC400_START_BLOCK or START_BLOCK");
@@ -52,7 +47,7 @@ async function getLogsRange(from: bigint, to: bigint) {
   );
 }
 
-// per-loop cache (bounded)
+// bounded cache
 const blockTimeCache = new Map<number, Date>();
 
 async function getBlockTime(blockNumber: number): Promise<Date> {
@@ -75,12 +70,10 @@ async function getBlockTime(blockNumber: number): Promise<Date> {
 
 // ------------------- DB helpers -------------------
 
-async function resolveStartFromDb(): Promise<bigint> {
-  // meta is source of truth
+async function resolveNextFrom(): Promise<bigint> {
   const meta = await getMeta("last_indexed_block");
   if (meta) return BigInt(meta) + 1n;
 
-  // fallback: DB max
   const res = await pool.query("SELECT MAX(block_number) AS max FROM transfers");
   const max = res.rows[0]?.max;
   if (max) return BigInt(max) + 1n;
@@ -88,11 +81,6 @@ async function resolveStartFromDb(): Promise<bigint> {
   return START_BLOCK;
 }
 
-/**
- * Bulk resolve address -> id using 2 queries:
- * 1) INSERT missing (ON CONFLICT DO NOTHING)
- * 2) SELECT ids back
- */
 async function bulkGetOrCreateAddressIds(
   client: PoolClient,
   addrs: string[]
@@ -127,41 +115,35 @@ async function bulkGetOrCreateAddressIds(
 // ------------------- Indexer -------------------
 
 export async function runIndexer() {
-  console.log("🟡 BC400 live indexer (safeLatest + overlap, Render+local env support)");
+  console.log("🟡 BC400 live indexer (safeLatest + idempotent + correct overlap)");
   console.log("Token:", tokenAddress);
   console.log("START_BLOCK:", START_BLOCK.toString());
-  console.log(
-    "BATCH:", INDEXER_BATCH_SIZE.toString(),
-    "CONFIRMATIONS:", CONFIRMATIONS.toString(),
-    "LOOKBACK:", LOOKBACK_BLOCKS.toString(),
-    "SLEEP_MS:", SLEEP_MS
-  );
 
-  let from = await resolveStartFromDb();
-  console.log("Initial from:", from.toString());
+  let nextFrom = await resolveNextFrom();
+  if (nextFrom < START_BLOCK) nextFrom = START_BLOCK;
+
+  console.log("Initial nextFrom:", nextFrom.toString());
 
   while (true) {
     const latest = BigInt(await callRpc(() => provider.getBlockNumber(), "getBlockNumber"));
     const safeLatest = latest > CONFIRMATIONS ? latest - CONFIRMATIONS : 0n;
 
-    if (from > safeLatest) {
+    if (nextFrom > safeLatest) {
       console.log(`Up to date. latest=${latest} safeLatest=${safeLatest}. Sleeping ${SLEEP_MS}ms...`);
       await sleep(SLEEP_MS);
       continue;
     }
 
-    // overlap lookback (reorg/rpc safety)
-    const overlapFrom =
-      from > LOOKBACK_BLOCKS ? from - LOOKBACK_BLOCKS : START_BLOCK;
+    // scan window uses overlap only for safety, but progress is based on nextFrom
+    const scanFrom = nextFrom > LOOKBACK_BLOCKS ? nextFrom - LOOKBACK_BLOCKS : START_BLOCK;
+    let scanTo = nextFrom + (INDEXER_BATCH_SIZE - 1n);
+    if (scanTo > safeLatest) scanTo = safeLatest;
 
-    let to = overlapFrom + (INDEXER_BATCH_SIZE - 1n);
-    if (to > safeLatest) to = safeLatest;
-
-    console.log(`Scanning ${overlapFrom} → ${to} (latest=${latest}, safeLatest=${safeLatest})`);
+    console.log(`Scanning ${scanFrom} → ${scanTo} (nextFrom=${nextFrom}, safeLatest=${safeLatest})`);
 
     let logs: any[] = [];
     try {
-      logs = await getLogsRange(overlapFrom, to);
+      logs = await getLogsRange(scanFrom, scanTo);
     } catch (err) {
       console.error("getLogs failed (retry after 5s):", err);
       await sleep(5000);
@@ -170,92 +152,87 @@ export async function runIndexer() {
 
     console.log(`  Found ${logs.length} Transfer logs`);
 
-    // even if no logs, we still advance progress (that IS “advancing”)
-    if (logs.length === 0) {
-      await setMeta("last_indexed_block", to.toString());
-      from = to + 1n;
-      continue;
+    // Prefetch times only if needed
+    if (logs.length > 0) {
+      const uniqueBlocks = Array.from(new Set(logs.map((l) => Number(l.blockNumber)))).sort((a, b) => a - b);
+      for (const bn of uniqueBlocks) await getBlockTime(bn);
     }
-
-    // prefetch block times
-    const uniqueBlocks = Array.from(new Set(logs.map((l) => Number(l.blockNumber)))).sort((a, b) => a - b);
-    for (const bn of uniqueBlocks) await getBlockTime(bn);
 
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
 
-      // bulk resolve addresses
-      const addrList: string[] = [];
-      for (const log of logs) {
-        const { from: fa, to: ta } = parseTransferLog(log);
-        addrList.push(fa, ta);
+      if (logs.length > 0) {
+        const addrList: string[] = [];
+        for (const log of logs) {
+          const { from: fa, to: ta } = parseTransferLog(log);
+          addrList.push(fa, ta);
+        }
+        const addrMap = await bulkGetOrCreateAddressIds(client, addrList);
+
+        const tx_hash: string[] = [];
+        const log_index: number[] = [];
+        const block_number: string[] = [];
+        const block_time: Date[] = [];
+        const from_id: number[] = [];
+        const to_id: number[] = [];
+        const raw_amount: string[] = [];
+
+        for (const log of logs) {
+          const { from: fa, to: ta, rawAmount } = parseTransferLog(log);
+          const bn = Number(log.blockNumber);
+          const bt = blockTimeCache.get(bn) || (await getBlockTime(bn));
+
+          const faId = addrMap.get(fa);
+          const taId = addrMap.get(ta);
+          if (!faId || !taId) throw new Error(`Address id missing fa=${fa} ta=${ta}`);
+
+          tx_hash.push(String(log.transactionHash));
+          log_index.push(Number(log.index));
+          block_number.push(String(log.blockNumber));
+          block_time.push(bt);
+          from_id.push(faId);
+          to_id.push(taId);
+          raw_amount.push(rawAmount.toString());
+        }
+
+        const BATCH_ROWS = 1000;
+        for (let i = 0; i < tx_hash.length; i += BATCH_ROWS) {
+          const j = Math.min(i + BATCH_ROWS, tx_hash.length);
+
+          await client.query(
+            `
+            INSERT INTO transfers (
+              tx_hash, log_index, block_number, block_time,
+              from_address_id, to_address_id, raw_amount
+            )
+            SELECT *
+            FROM UNNEST(
+              $1::text[],
+              $2::int[],
+              $3::bigint[],
+              $4::timestamptz[],
+              $5::int[],
+              $6::int[],
+              $7::text[]
+            )
+            ON CONFLICT (tx_hash, log_index) DO NOTHING
+            `,
+            [
+              tx_hash.slice(i, j),
+              log_index.slice(i, j),
+              block_number.slice(i, j).map((x) => BigInt(x).toString()),
+              block_time.slice(i, j),
+              from_id.slice(i, j),
+              to_id.slice(i, j),
+              raw_amount.slice(i, j),
+            ]
+          );
+        }
       }
-      const addrMap = await bulkGetOrCreateAddressIds(client, addrList);
 
-      // build arrays for UNNEST insert
-      const tx_hash: string[] = [];
-      const log_index: number[] = [];
-      const block_number: string[] = [];
-      const block_time: Date[] = [];
-      const from_id: number[] = [];
-      const to_id: number[] = [];
-      const raw_amount: string[] = [];
-
-      for (const log of logs) {
-        const { from: fa, to: ta, rawAmount } = parseTransferLog(log);
-        const bt = blockTimeCache.get(Number(log.blockNumber)) || (await getBlockTime(Number(log.blockNumber)));
-
-        const faId = addrMap.get(fa);
-        const taId = addrMap.get(ta);
-        if (!faId || !taId) throw new Error(`Address id missing fa=${fa} ta=${ta}`);
-
-        tx_hash.push(String(log.transactionHash));
-        log_index.push(Number(log.index));
-        block_number.push(String(log.blockNumber));
-        block_time.push(bt);
-        from_id.push(faId);
-        to_id.push(taId);
-        raw_amount.push(rawAmount.toString());
-      }
-
-      // insert transfers (idempotent)
-      const BATCH_ROWS = 1000;
-      for (let i = 0; i < tx_hash.length; i += BATCH_ROWS) {
-        const j = Math.min(i + BATCH_ROWS, tx_hash.length);
-
-        await client.query(
-          `
-          INSERT INTO transfers (
-            tx_hash, log_index, block_number, block_time,
-            from_address_id, to_address_id, raw_amount
-          )
-          SELECT *
-          FROM UNNEST(
-            $1::text[],
-            $2::int[],
-            $3::bigint[],
-            $4::timestamptz[],
-            $5::int[],
-            $6::int[],
-            $7::text[]
-          )
-          ON CONFLICT (tx_hash, log_index) DO NOTHING
-          `,
-          [
-            tx_hash.slice(i, j),
-            log_index.slice(i, j),
-            block_number.slice(i, j).map((x) => BigInt(x).toString()),
-            block_time.slice(i, j),
-            from_id.slice(i, j),
-            to_id.slice(i, j),
-            raw_amount.slice(i, j),
-          ]
-        );
-      }
-
-      // advance meta inside same transaction
-      await setMeta("last_indexed_block", to.toString(), client);
+      // ✅ Progress is monotonic and based on scanTo (not scanFrom)
+      await setMeta("last_indexed_block", scanTo.toString(), client);
 
       await client.query("COMMIT");
     } catch (e) {
@@ -267,11 +244,11 @@ export async function runIndexer() {
       client.release();
     }
 
-    from = to + 1n;
+    // ✅ Advance progress pointer safely
+    nextFrom = scanTo + 1n;
   }
 }
 
-// run as script
 runIndexer().catch((err) => {
   console.error("Indexer crashed:", err);
   process.exit(1);
