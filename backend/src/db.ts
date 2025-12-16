@@ -15,7 +15,10 @@ export const pool = new Pool({
 });
 
 // -------- meta helpers (single source of truth for progress) --------
-export async function getMeta(key: string, client?: PoolClient): Promise<string | null> {
+export async function getMeta(
+  key: string,
+  client?: PoolClient
+): Promise<string | null> {
   const c = client ?? (await pool.connect());
   const releaseAfter = !client;
   try {
@@ -26,7 +29,11 @@ export async function getMeta(key: string, client?: PoolClient): Promise<string 
   }
 }
 
-export async function setMeta(key: string, value: string, client?: PoolClient): Promise<void> {
+export async function setMeta(
+  key: string,
+  value: string,
+  client?: PoolClient
+): Promise<void> {
   const c = client ?? (await pool.connect());
   const releaseAfter = !client;
   try {
@@ -35,6 +42,33 @@ export async function setMeta(key: string, value: string, client?: PoolClient): 
       INSERT INTO meta (key, value)
       VALUES ($1, $2)
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+      `,
+      [key, value]
+    );
+  } finally {
+    if (releaseAfter) c.release();
+  }
+}
+
+/**
+ * Monotonic meta setter (never decreases).
+ * Use this for progress pointers like last_indexed_block.
+ */
+export async function setMetaMax(
+  key: string,
+  value: string,
+  client?: PoolClient
+): Promise<void> {
+  const c = client ?? (await pool.connect());
+  const releaseAfter = !client;
+  try {
+    await c.query(
+      `
+      INSERT INTO meta (key, value)
+      VALUES ($1, $2)
+      ON CONFLICT (key)
+      DO UPDATE SET value =
+        GREATEST(meta.value::bigint, EXCLUDED.value::bigint)::text
       `,
       [key, value]
     );
@@ -56,7 +90,10 @@ export async function getOrCreateAddressId(
   if (cached) return cached;
 
   // 1) try fast select
-  const existing = await client.query("SELECT id FROM addresses WHERE address = $1", [lower]);
+  const existing = await client.query(
+    "SELECT id FROM addresses WHERE address = $1",
+    [lower]
+  );
   if (existing.rowCount) {
     const id = existing.rows[0].id as number;
     addressIdCache.set(lower, id);
@@ -81,8 +118,12 @@ export async function getOrCreateAddressId(
   }
 
   // 3) someone else inserted; select again
-  const again = await client.query("SELECT id FROM addresses WHERE address = $1", [lower]);
-  if (!again.rowCount) throw new Error("Failed to getOrCreateAddressId for " + lower);
+  const again = await client.query(
+    "SELECT id FROM addresses WHERE address = $1",
+    [lower]
+  );
+  if (!again.rowCount)
+    throw new Error("Failed to getOrCreateAddressId for " + lower);
 
   const id = again.rows[0].id as number;
   addressIdCache.set(lower, id);
