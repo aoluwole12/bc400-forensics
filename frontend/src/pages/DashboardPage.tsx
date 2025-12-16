@@ -12,7 +12,8 @@ type Summary = {
 type Holder = {
   rank: number;
   address: string;
-  balance_bc400: string;
+  balance_bc400: string;          // fallback human (sometimes present)
+  balance_raw?: string | null;    // preferred raw (18dp) if present
   tx_count: number;
   first_seen: string | null;
   last_seen: string | null;
@@ -23,18 +24,139 @@ type Transfer = {
   block_time: string | null;
   from_address: string;
   to_address: string;
-  amount_bc400: string | null;
+  amount_bc400: string | null;     // fallback human (sometimes present)
+  amount_raw?: string | null;      // preferred raw (18dp) if present
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
 
+/**
+ * BC400 is 18 decimals.
+ * Formatter supports:
+ * - already-human decimal string (e.g. "1234.56")
+ * - raw integer string (e.g. "1000000000000000000") in 18dp
+ *
+ * Uses BigInt so huge balances do not lose precision.
+ */
+const BC400_DECIMALS = 18;
+
+function toBigIntSafe(input: string): bigint {
+  const s = String(input ?? "").trim().replace(/,/g, "");
+  if (s === "" || s === "-") return 0n;
+
+  const cleaned = s.startsWith("-")
+    ? "-" + s.slice(1).replace(/[^\d]/g, "")
+    : s.replace(/[^\d]/g, "");
+
+  if (cleaned === "" || cleaned === "-") return 0n;
+
+  try {
+    return BigInt(cleaned);
+  } catch {
+    return 0n;
+  }
+}
+
+function addCommas(intStr: string): string {
+  const neg = intStr.startsWith("-");
+  const s = neg ? intStr.slice(1) : intStr;
+  const out = s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return neg ? `-${out}` : out;
+}
+
+/**
+ * Detect "raw 18dp token integer string".
+ * - integer-only
+ * - at least 19 digits (meaning it could contain fractional units once shifted by 18)
+ */
+function looksRaw18(v: string): boolean {
+  const s = String(v ?? "").trim().replace(/,/g, "");
+  if (!/^-?\d+$/.test(s)) return false;
+  const digitsLen = s.replace("-", "").length;
+  return digitsLen >= 19;
+}
+
+function formatFromRaw18(raw: string, maxFrac = 6, minFrac = 2): string {
+  const bi = toBigIntSafe(raw);
+  const neg = bi < 0n;
+  const abs = neg ? -bi : bi;
+
+  const base = 10n ** BigInt(BC400_DECIMALS);
+  const whole = abs / base;
+  const frac = abs % base;
+
+  const wholeStr = addCommas(whole.toString());
+
+  const fracFull = frac.toString().padStart(BC400_DECIMALS, "0");
+  let fracCut = fracFull.slice(0, Math.min(maxFrac, BC400_DECIMALS));
+
+  // trim trailing zeros but keep at least minFrac
+  fracCut = fracCut.replace(/0+$/, "");
+  while (fracCut.length < minFrac) fracCut += "0";
+  if (fracCut.length === 0) fracCut = "0".repeat(minFrac);
+
+  const out = `${wholeStr}.${fracCut}`;
+  return neg ? `-${out}` : out;
+}
+
+function formatHumanDecimal(input: string, maxFrac = 6, minFrac = 0): string {
+  const s = String(input ?? "").trim().replace(/,/g, "");
+  if (s === "" || s === "-") return "0";
+
+  // integer → commas only
+  if (/^-?\d+$/.test(s)) return addCommas(s);
+
+  // decimal string → commas + trimmed decimals
+  if (/^-?\d+(\.\d+)?$/.test(s)) {
+    const neg = s.startsWith("-");
+    const v = neg ? s.slice(1) : s;
+
+    const [w = "0", f = ""] = v.split(".");
+    const whole = addCommas((w || "0").replace(/^0+(?=\d)/, "") || "0");
+
+    let frac = (f || "").slice(0, maxFrac);
+    frac = frac.replace(/0+$/, "");
+    while (frac.length < minFrac) frac += "0";
+
+    return frac.length ? `${neg ? "-" : ""}${whole}.${frac}` : `${neg ? "-" : ""}${whole}`;
+  }
+
+  // fallback (non-numeric)
+  return input;
+}
+
+/**
+ * Non-token numeric formatter (blocks, totals, tx counts).
+ * Never shifts decimals. Never uses Number() for comma placement.
+ */
 function formatNumber(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return "-";
-  const str = String(value);
-  if (/^\d+$/.test(str)) return str.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  const num = Number(str);
-  if (Number.isNaN(num)) return str;
-  return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return formatHumanDecimal(String(value), 6, 0);
+}
+
+/**
+ * Token formatter for BC400 amounts/balances.
+ * - raw 18dp integer => shift by 18
+ * - human decimal => commas + 2..6 decimals
+ */
+function formatToken(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return "-";
+  const s = String(value).trim();
+
+  // raw integer (18dp)
+  if (looksRaw18(s)) return formatFromRaw18(s, 6, 2);
+
+  // already-human decimal or small integer (still show 2 decimals)
+  return formatHumanDecimal(s, 6, 2);
+}
+
+/**
+ * ✅ Best-practice selector:
+ * Prefer raw (exact) if present, otherwise fall back to human.
+ */
+function formatTokenPreferRaw(raw: string | null | undefined, human: string | null | undefined): string {
+  const pick = raw && String(raw).trim() !== "" ? raw : human;
+  return formatToken(pick);
 }
 
 function formatDateTime(iso: string | null): string {
@@ -55,7 +177,10 @@ function normalizeHolder(raw: any, index: number): Holder {
   return {
     rank: raw.rank ?? raw.position ?? raw.index ?? index + 1,
     address: raw.address ?? raw.wallet ?? "",
-    balance_bc400: raw.balance_bc400 ?? raw.balance ?? raw.balanceRaw ?? "0",
+    // fallback human
+    balance_bc400: raw.balance_bc400 ?? raw.balanceBC400 ?? raw.balance ?? "0",
+    // preferred raw
+    balance_raw: raw.balanceRaw ?? raw.balance_raw ?? raw.balance_raw_18 ?? null,
     tx_count: raw.tx_count ?? raw.txCount ?? raw.transferCount ?? 0,
     first_seen: raw.first_seen ?? raw.firstSeen ?? null,
     last_seen: raw.last_seen ?? raw.lastSeen ?? null,
@@ -68,13 +193,10 @@ function normalizeTransfer(raw: any): Transfer {
     block_time: raw.block_time ?? raw.blockTime ?? raw.time ?? null,
     from_address: raw.from_address ?? raw.fromAddress ?? raw.from ?? "",
     to_address: raw.to_address ?? raw.toAddress ?? raw.to ?? "",
-    amount_bc400:
-      raw.amount_bc400 ??
-      raw.amount ??
-      raw.value ??
-      raw.raw_amount ??
-      raw.rawAmount ??
-      null,
+    // fallback human
+    amount_bc400: raw.amount_bc400 ?? raw.amountBC400 ?? raw.amount ?? raw.value ?? null,
+    // preferred raw
+    amount_raw: raw.raw_amount ?? raw.rawAmount ?? raw.amount_raw ?? null,
   };
 }
 
@@ -87,13 +209,12 @@ export default function DashboardPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [healthRes, summaryRes, holdersRes, transfersRes] =
-          await Promise.all([
-            fetch(`${API_BASE}/health`),
-            fetch(`${API_BASE}/summary`),
-            fetch(`${API_BASE}/top-holders`),
-            fetch(`${API_BASE}/transfers`),
-          ]);
+        const [healthRes, summaryRes, holdersRes, transfersRes] = await Promise.all([
+          fetch(`${API_BASE}/health`),
+          fetch(`${API_BASE}/summary`),
+          fetch(`${API_BASE}/top-holders`),
+          fetch(`${API_BASE}/transfers`),
+        ]);
 
         setSystemOnline(healthRes.ok);
 
@@ -164,24 +285,12 @@ export default function DashboardPage() {
             <h2 className="panel-title panel-title--system">System Health</h2>
             <div className="system-health-row">
               <span className="system-label">Indexer:</span>
-              <span
-                className={
-                  systemOnline
-                    ? "system-value system-value--ok"
-                    : "system-value system-value--bad"
-                }
-              >
+              <span className={systemOnline ? "system-value system-value--ok" : "system-value system-value--bad"}>
                 {systemOnline ? "Online" : "Offline"}
               </span>
 
               <span className="system-label system-label--spacer">API Base:</span>
-              <span
-                className={
-                  systemOnline
-                    ? "system-value system-value--ok"
-                    : "system-value system-value--bad"
-                }
-              >
+              <span className={systemOnline ? "system-value system-value--ok" : "system-value system-value--bad"}>
                 {systemOnline ? "Online" : "Offline"}
               </span>
             </div>
@@ -215,7 +324,12 @@ export default function DashboardPage() {
                     <tr key={h.address}>
                       <td className="col-rank">{h.rank}</td>
                       <td className="address-cell">{h.address}</td>
-                      <td className="col-balance">{formatNumber(h.balance_bc400)}</td>
+
+                      {/* ✅ Best practice: prefer raw when available */}
+                      <td className="col-balance">
+                        {formatTokenPreferRaw(h.balance_raw ?? null, h.balance_bc400)}
+                      </td>
+
                       <td className="col-tx">{formatNumber(h.tx_count ?? 0)}</td>
                       <td className="col-tags">none</td>
                       <td className="col-time">{formatDateTime(h.first_seen)}</td>
@@ -231,9 +345,7 @@ export default function DashboardPage() {
         <section className="panel panel--table panel--recent">
           <div className="panel-header-row">
             <h2 className="panel-title">Recent Transfers</h2>
-            <span className="panel-caption">
-              Latest {last20Transfers.length} indexed transfers
-            </span>
+            <span className="panel-caption">Latest {last20Transfers.length} indexed transfers</span>
           </div>
 
           {last20Transfers.length === 0 ? (
@@ -257,8 +369,10 @@ export default function DashboardPage() {
                       <td className="col-time">{formatDateTime(t.block_time)}</td>
                       <td className="address-cell">{t.from_address}</td>
                       <td className="address-cell">{t.to_address}</td>
+
+                      {/* ✅ Best practice: prefer raw when available */}
                       <td className="col-amount">
-                        {t.amount_bc400 === null ? "-" : formatNumber(t.amount_bc400)}
+                        {formatTokenPreferRaw(t.amount_raw ?? null, t.amount_bc400)}
                       </td>
                     </tr>
                   ))}

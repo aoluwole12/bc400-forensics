@@ -50,7 +50,7 @@ const latestSells = [
 
 // -----------------------------
 // Formatting helpers (BC400 = 18 decimals)
-// This ONLY affects number display, not table structure.
+// Display only (does not change data)
 // -----------------------------
 const BC400_DECIMALS = 18;
 
@@ -71,10 +71,15 @@ function toBigIntSafe(input: string): bigint {
   }
 }
 
+/**
+ * Raw detection for 18dp token ints:
+ * - integer only
+ * - length >= 19 digits (so shifting 18 makes sense)
+ */
 function looksRaw18(v: string): boolean {
   const s = String(v ?? "").trim().replace(/,/g, "");
-  // raw is usually integer-only and very long
-  return /^-?\d+$/.test(s) && s.replace("-", "").length > 18;
+  if (!/^-?\d+$/.test(s)) return false;
+  return s.replace("-", "").length >= 19;
 }
 
 function addCommas(intStr: string): string {
@@ -98,7 +103,6 @@ function formatFromRaw18(raw: string, maxFrac = 6, minFrac = 2): string {
 
   const wholeStr = addCommas(whole.toString());
 
-  // build fractional part then cut
   const fracFull = frac.toString().padStart(BC400_DECIMALS, "0");
   let fracCut = fracFull.slice(0, Math.min(maxFrac, BC400_DECIMALS));
 
@@ -112,19 +116,25 @@ function formatFromRaw18(raw: string, maxFrac = 6, minFrac = 2): string {
 }
 
 /**
- * decimal string -> commas + controlled decimals
+ * decimal or integer string -> commas + controlled decimals
+ * - shifts ONLY when looksRaw18() is true
+ * - IMPORTANT: if it's a human integer and minFrac>0, append ".00"
  */
 function formatHumanDecimal(input: string, maxFrac = 6, minFrac = 2): string {
   const s = String(input ?? "").trim().replace(/,/g, "");
   if (s === "" || s === "-") return "0";
 
-  // if it’s raw, treat as raw
+  // raw token int (18dp)
   if (looksRaw18(s)) return formatFromRaw18(s, maxFrac, minFrac);
 
-  // plain integer
-  if (/^-?\d+$/.test(s)) return addCommas(s);
+  // plain integer (human) -> commas + .00 if requested
+  if (/^-?\d+$/.test(s)) {
+    const whole = addCommas(s);
+    if (minFrac > 0) return `${whole}.${"0".repeat(minFrac)}`;
+    return whole;
+  }
 
-  // decimal
+  // decimal (human)
   if (/^-?\d+(\.\d+)?$/.test(s)) {
     const neg = s.startsWith("-");
     const v = neg ? s.slice(1) : s;
@@ -133,19 +143,21 @@ function formatHumanDecimal(input: string, maxFrac = 6, minFrac = 2): string {
 
     let frac = (f || "").slice(0, maxFrac);
     frac = frac.replace(/0+$/, "");
-    while (frac.length < minFrac) frac += "0";
-    if (frac.length === 0) frac = "0".repeat(minFrac);
 
-    return `${neg ? "-" : ""}${whole}.${frac}`;
+    while (frac.length < minFrac) frac += "0";
+    if (minFrac > 0 && frac.length === 0) frac = "0".repeat(minFrac);
+
+    return frac.length ? `${neg ? "-" : ""}${whole}.${frac}` : `${neg ? "-" : ""}${whole}`;
   }
 
+  // fallback
   return input;
 }
 
 /**
- * Main formatter for BC400 amounts/balances:
- * - if raw integer -> divide by 1e18 and show human
- * - if already human -> just format nicely
+ * BC400 amount/balance formatter:
+ * - raw -> shift 18dp
+ * - human -> commas + 2..6 decimals
  */
 function fmtBC400(v: string | null | undefined): string {
   if (v === null || v === undefined) return "-";
@@ -153,12 +165,12 @@ function fmtBC400(v: string | null | undefined): string {
 }
 
 /**
- * Formatter for block numbers etc. (integers with commas)
+ * Integer formatter (blocks only)
  */
 function fmtInt(v: string | null | undefined): string {
   if (!v) return "-";
   const s = String(v).trim().replace(/,/g, "");
-  if (/^\d+$/.test(s)) return addCommas(s);
+  if (/^-?\d+$/.test(s)) return addCommas(s);
   return v;
 }
 
@@ -186,7 +198,6 @@ function DashboardTables() {
               <tr key={h.rank}>
                 <td className="col-rank">{h.rank}</td>
                 <td className="mono">{h.address}</td>
-                {/* ✅ only changed the display */}
                 <td className="col-amount mono">{fmtBC400(h.balance)}</td>
               </tr>
             ))}
@@ -216,7 +227,6 @@ function DashboardTables() {
                 <td>{t.datetime}</td>
                 <td className="mono">{t.from}</td>
                 <td className="mono">{t.to}</td>
-                {/* ✅ raw -> human */}
                 <td className="col-amount mono">{fmtBC400(t.amount)}</td>
               </tr>
             ))}

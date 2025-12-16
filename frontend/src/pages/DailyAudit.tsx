@@ -3,24 +3,90 @@ import "../index.css";
 import { Header } from "../components/Header";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
+const TOKEN_DECIMALS = 18;
 
 type DailyReport = {
   generatedAt: string;
   security: { criticalAlerts: boolean };
-  whales: { net_bc400: number; window_hours: number };
+  whales: { net_bc400: number | string; window_hours: number };
   holders: { total_now: number; new_24h: number; pct_change_24h: number | null };
   liquidity: { lock_percent: number; changed_24h: boolean };
 };
 
-function formatSignedMillions(value: number): string {
-  if (!Number.isFinite(value) || value === 0) return "0";
-  const sign = value > 0 ? "+" : "−";
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000) {
-    const millions = abs / 1_000_000;
-    return `${sign}${millions.toLocaleString(undefined, { maximumFractionDigits: 1 })}M`;
+/**
+ * Converts raw integer strings (18 decimals) into a human decimal string.
+ * If the value already contains ".", we assume it's already human.
+ */
+function toHumanDecimalString(
+  value: string | number | null | undefined,
+  decimals = TOKEN_DECIMALS
+): string {
+  if (value === null || value === undefined) return "0";
+
+  const s = String(value).trim();
+  if (!s) return "0";
+
+  // already human (has decimal)
+  if (s.includes(".")) return s;
+
+  // integer string?
+  const neg = s.startsWith("-");
+  const digits = neg ? s.slice(1) : s;
+
+  if (!/^\d+$/.test(digits)) return s;
+
+  const pad = decimals + 1;
+  const padded = digits.length < pad ? digits.padStart(pad, "0") : digits;
+
+  const intPart = padded.slice(0, padded.length - decimals);
+  const fracPart = padded.slice(padded.length - decimals);
+
+  const fracTrimmed = fracPart.replace(/0+$/, "");
+  const out = fracTrimmed.length ? `${intPart}.${fracTrimmed}` : intPart;
+
+  return neg ? `-${out}` : out;
+}
+
+function formatHumanWithCommas(humanDecimal: string, maxFractionDigits = 6): string {
+  if (!humanDecimal) return "-";
+
+  const neg = humanDecimal.startsWith("-");
+  const s = neg ? humanDecimal.slice(1) : humanDecimal;
+
+  const [intRaw, fracRaw = ""] = s.split(".");
+  const intPart = intRaw.replace(/^0+(?=\d)/, "") || "0";
+
+  const intWithCommas = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+  if (!fracRaw) return neg ? `-${intWithCommas}` : intWithCommas;
+
+  const fracLimited = fracRaw.slice(0, maxFractionDigits).replace(/0+$/, "");
+  if (!fracLimited) return neg ? `-${intWithCommas}` : intWithCommas;
+
+  return neg ? `-${intWithCommas}.${fracLimited}` : `${intWithCommas}.${fracLimited}`;
+}
+
+function formatToken(value: string | number, maxFractionDigits = 6): string {
+  const human = toHumanDecimalString(value, TOKEN_DECIMALS);
+  return formatHumanWithCommas(human, maxFractionDigits);
+}
+
+/**
+ * Whale net formatter:
+ * - If the backend sends raw integer (18d) -> we convert.
+ * - If backend already sends human number -> we keep it and format.
+ */
+function formatSignedToken(value: string | number): string {
+  const human = toHumanDecimalString(value, TOKEN_DECIMALS);
+  // preserve sign and show commas/decimals
+  const n = Number(human);
+  if (Number.isFinite(n)) {
+    const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+    return sign + formatHumanWithCommas(String(Math.abs(n)), 4);
   }
-  return `${sign}${abs.toLocaleString()}`;
+  // if can't parse, just display the formatted human string
+  if (human.startsWith("-")) return "−" + formatHumanWithCommas(human.slice(1), 4);
+  return "+" + formatHumanWithCommas(human, 4);
 }
 
 export const DailyAuditPage: React.FC = () => {
@@ -115,7 +181,7 @@ export const DailyAuditPage: React.FC = () => {
             <div className="audit-card">
               <h3 className="audit-card-title">Whale Activity</h3>
               <p className="audit-card-main">
-                {report ? `Whales net ${formatSignedMillions(report.whales.net_bc400)} BC400.` : "Calculating whale flows..."}
+                {report ? `Whales net ${formatSignedToken(report.whales.net_bc400)} BC400.` : "Calculating whale flows..."}
               </p>
               <p className="audit-card-note">
                 Window: {report?.whales.window_hours ?? 24}h. Based on live transfer data in Postgres.
@@ -127,7 +193,7 @@ export const DailyAuditPage: React.FC = () => {
               <p className="audit-card-main">
                 {report ? (
                   <>
-                    New holders: +{report.holders.new_24h}{" "}
+                    New holders: +{Number(report.holders.new_24h).toLocaleString()}{" "}
                     {report.holders.pct_change_24h !== null ? `(${report.holders.pct_change_24h.toFixed(1)}%)` : "(—)"}.
                   </>
                 ) : (
