@@ -1,29 +1,33 @@
 import "dotenv/config";
-import { ethers, Log } from "ethers";
+import { ethers, type Log } from "ethers";
 import { pool, getMeta, setMeta } from "./db";
 import { provider, callRpc } from "./clients/bscClient";
 import type { PoolClient } from "pg";
 
-// ------------------- Env -------------------
+// ------------------- Env (supports Render + local) -------------------
 const tokenAddress = (process.env.BC400_TOKEN_ADDRESS || process.env.TOKEN_ADDRESS || "").toLowerCase();
 const startBlockEnv = process.env.BC400_START_BLOCK || process.env.START_BLOCK;
 
-if (!tokenAddress) throw new Error("Missing BC400 token address env (BC400_TOKEN_ADDRESS or TOKEN_ADDRESS)");
-if (!startBlockEnv) throw new Error("Missing start block env (BC400_START_BLOCK or START_BLOCK)");
+if (!tokenAddress) throw new Error("Missing token address env. Set BC400_TOKEN_ADDRESS or TOKEN_ADDRESS");
+if (!startBlockEnv) throw new Error("Missing start block env. Set BC400_START_BLOCK or START_BLOCK");
 
 const START_BLOCK = BigInt(startBlockEnv);
 
 // ------------------- Tuning -------------------
-const CHUNK_SIZE = BigInt(process.env.BACKFILL_CHUNK_SIZE || "8000"); // bigger is OK; adjust if RPC complains
-const CONFIRMATIONS = BigInt(process.env.INDEXER_CONFIRMATIONS || "5"); // keep consistent with indexer
+const CHUNK_SIZE = BigInt(process.env.BACKFILL_CHUNK_SIZE || "4000");
+const CONFIRMATIONS = BigInt(process.env.BACKFILL_CONFIRMATIONS || "5"); // reorg safety for “near head”
+const SLEEP_MS = Number(process.env.BACKFILL_SLEEP_MS || "0"); // backfill usually runs once; 0 = no sleep
 const MAX_BLOCKTIME_CACHE = Number(process.env.BACKFILL_BLOCKTIME_CACHE || "10000");
 
-// Meta keys
-const META_BACKFILL = "last_backfilled_block";
-const META_INDEXER = "last_indexed_block";
+// Meta key dedicated to backfill (do NOT reuse last_scanned_block)
+const BACKFILL_META_KEY = "last_backfilled_block";
 
 // ERC-20 Transfer topic
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 function parseTransferLog(log: Log) {
   const from = ("0x" + log.topics[1].slice(26)).toLowerCase();
@@ -102,51 +106,53 @@ async function bulkGetOrCreateAddressIds(
   return map;
 }
 
-async function resolveBackfillFrom(): Promise<bigint> {
-  const meta = await getMeta(META_BACKFILL);
+async function resolveNextFrom(): Promise<bigint> {
+  const meta = await getMeta(BACKFILL_META_KEY);
   if (meta) return BigInt(meta) + 1n;
   return START_BLOCK;
 }
 
-/**
- * Backfill only up to a high-water mark to avoid duplicating the live indexer’s job:
- * highWater = min( safeLatest, last_indexed_block )
- * If last_indexed_block missing, we fall back to safeLatest.
- */
-async function resolveHighWater(): Promise<bigint> {
+async function resolveTargetTo(): Promise<bigint> {
+  // Prefer stopping at indexer progress if present (keeps backfill from “chasing head” forever)
+  const indexed = await getMeta("last_indexed_block");
+  if (indexed) return BigInt(indexed);
+
+  // otherwise use safeLatest
   const latest = BigInt(await callRpc(() => provider.getBlockNumber(), "getBlockNumber"));
   const safeLatest = latest > CONFIRMATIONS ? latest - CONFIRMATIONS : 0n;
-
-  const idxMeta = await getMeta(META_INDEXER);
-  const indexerHead = idxMeta ? BigInt(idxMeta) : safeLatest;
-
-  return indexerHead < safeLatest ? indexerHead : safeLatest;
+  return safeLatest;
 }
 
 async function main() {
-  console.log("🚀 BC400 backfill (indexer-aware, cost-effective) starting...");
+  console.log("🧱 BC400 backfill (indexer-compatible, bulk address upsert, transactional meta) شروع...");
   console.log("Token:", tokenAddress);
   console.log("START_BLOCK:", START_BLOCK.toString());
-  console.log("CHUNK_SIZE:", CHUNK_SIZE.toString());
-  console.log("CONFIRMATIONS:", CONFIRMATIONS.toString());
 
-  const highWater = await resolveHighWater();
-  const fromStart = await resolveBackfillFrom();
+  let nextFrom = await resolveNextFrom();
+  if (nextFrom < START_BLOCK) nextFrom = START_BLOCK;
 
-  if (fromStart > highWater) {
-    console.log(`Nothing to backfill. from=${fromStart} > highWater=${highWater}`);
+  const targetTo = await resolveTargetTo();
+  if (nextFrom > targetTo) {
+    console.log(`Nothing to backfill. nextFrom=${nextFrom} > targetTo=${targetTo}`);
     process.exit(0);
   }
 
-  console.log(`Backfill range: ${fromStart} → ${highWater}`);
+  console.log(`Backfill range: ${nextFrom} → ${targetTo}`);
 
-  for (let from = fromStart; from <= highWater; from += CHUNK_SIZE) {
-    const to = from + (CHUNK_SIZE - 1n) > highWater ? highWater : from + (CHUNK_SIZE - 1n);
+  for (let from = nextFrom; from <= targetTo; ) {
+    let to = from + (CHUNK_SIZE - 1n);
+    if (to > targetTo) to = targetTo;
 
-    console.log(`\n🔎 Scanning ${from} → ${to} (highWater=${highWater})`);
+    console.log(`\n🔎 Scanning blocks ${from} → ${to}`);
 
     let logs: Log[] = [];
-    logs = await getLogsRange(from, to);
+    try {
+      logs = await getLogsRange(from, to);
+    } catch (e) {
+      console.error(`❌ getLogs failed for ${from}-${to} (will NOT advance meta)`, e);
+      throw e;
+    }
+
     console.log(`  Found ${logs.length} Transfer logs`);
 
     // Prefetch block times only if needed
@@ -168,7 +174,7 @@ async function main() {
         }
         const addrMap = await bulkGetOrCreateAddressIds(client, addrList);
 
-        // build arrays for UNNEST insert
+        // build arrays
         const tx_hash: string[] = [];
         const log_index: number[] = [];
         const block_number: string[] = [];
@@ -230,18 +236,21 @@ async function main() {
         }
       }
 
-      // ✅ Only after inserts succeed
-      await setMeta(META_BACKFILL, to.toString(), client);
+      // ✅ commit-safe progress
+      await setMeta(BACKFILL_META_KEY, to.toString(), client);
 
       await client.query("COMMIT");
-      console.log(`  ✅ Updated ${META_BACKFILL} = ${to}`);
+      console.log(`  ✅ Updated ${BACKFILL_META_KEY} = ${to}`);
     } catch (e) {
       await client.query("ROLLBACK");
-      console.error("❌ Backfill chunk failed (rolled back):", e);
-      throw e; // let Render retry next scheduled run
+      console.error("❌ Chunk failed (rolled back). Meta not advanced.", e);
+      throw e;
     } finally {
       client.release();
     }
+
+    from = to + 1n;
+    if (SLEEP_MS > 0) await sleep(SLEEP_MS);
   }
 
   console.log("\n✅ Backfill complete.");
