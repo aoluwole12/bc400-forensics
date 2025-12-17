@@ -1,26 +1,23 @@
 import "dotenv/config";
-import { ethers, type Log } from "ethers";
+import { ethers, Log } from "ethers";
+import type { PoolClient } from "pg";
 import { pool, getMeta, setMeta } from "./db";
 import { provider, callRpc } from "./clients/bscClient";
-import type { PoolClient } from "pg";
 
-// ------------------- Env (supports Render + local) -------------------
+// ------------------- Env (Render + local support) -------------------
 const tokenAddress = (process.env.BC400_TOKEN_ADDRESS || process.env.TOKEN_ADDRESS || "").toLowerCase();
 const startBlockEnv = process.env.BC400_START_BLOCK || process.env.START_BLOCK;
 
-if (!tokenAddress) throw new Error("Missing token address env. Set BC400_TOKEN_ADDRESS or TOKEN_ADDRESS");
-if (!startBlockEnv) throw new Error("Missing start block env. Set BC400_START_BLOCK or START_BLOCK");
+if (!tokenAddress) throw new Error("Missing token address. Set BC400_TOKEN_ADDRESS or TOKEN_ADDRESS");
+if (!startBlockEnv) throw new Error("Missing start block. Set BC400_START_BLOCK or START_BLOCK");
 
 const START_BLOCK = BigInt(startBlockEnv);
 
 // ------------------- Tuning -------------------
 const CHUNK_SIZE = BigInt(process.env.BACKFILL_CHUNK_SIZE || "4000");
-const CONFIRMATIONS = BigInt(process.env.BACKFILL_CONFIRMATIONS || "5"); // reorg safety for “near head”
-const SLEEP_MS = Number(process.env.BACKFILL_SLEEP_MS || "0"); // backfill usually runs once; 0 = no sleep
-const MAX_BLOCKTIME_CACHE = Number(process.env.BACKFILL_BLOCKTIME_CACHE || "10000");
-
-// Meta key dedicated to backfill (do NOT reuse last_scanned_block)
-const BACKFILL_META_KEY = "last_backfilled_block";
+const CONFIRMATIONS = BigInt(process.env.BACKFILL_CONFIRMATIONS || process.env.INDEXER_CONFIRMATIONS || "5");
+const SLEEP_MS = Number(process.env.BACKFILL_SLEEP_MS || "250");
+const MAX_BLOCKTIME_CACHE = Number(process.env.BACKFILL_BLOCKTIME_CACHE || "20000");
 
 // ERC-20 Transfer topic
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
@@ -49,7 +46,7 @@ async function getLogsRange(from: bigint, to: bigint): Promise<Log[]> {
   );
 }
 
-// bounded cache
+// ------------------- Block time cache (bounded) -------------------
 const blockTimeCache = new Map<number, Date>();
 
 async function getBlockTime(blockNumber: number): Promise<Date> {
@@ -66,21 +63,15 @@ async function getBlockTime(blockNumber: number): Promise<Date> {
     blockTimeCache.clear();
     blockTimeCache.set(blockNumber, t);
   }
-
   return t;
 }
 
-/**
- * Bulk resolve address -> id using 2 queries:
- * 1) INSERT missing (ON CONFLICT DO NOTHING)
- * 2) SELECT ids back
- */
+// ------------------- Bulk address resolver (cheaper) -------------------
 async function bulkGetOrCreateAddressIds(
   client: PoolClient,
   addrs: string[]
 ): Promise<Map<string, number>> {
   if (addrs.length === 0) return new Map();
-
   const unique = Array.from(new Set(addrs.map((a) => a.toLowerCase())));
 
   await client.query(
@@ -106,50 +97,53 @@ async function bulkGetOrCreateAddressIds(
   return map;
 }
 
-async function resolveNextFrom(): Promise<bigint> {
-  const meta = await getMeta(BACKFILL_META_KEY);
+// ------------------- Backfill -------------------
+async function resolveBackfillFrom(): Promise<bigint> {
+  const meta = await getMeta("last_backfilled_block");
   if (meta) return BigInt(meta) + 1n;
   return START_BLOCK;
 }
 
-async function resolveTargetTo(): Promise<bigint> {
-  // Prefer stopping at indexer progress if present (keeps backfill from “chasing head” forever)
-  const indexed = await getMeta("last_indexed_block");
-  if (indexed) return BigInt(indexed);
-
-  // otherwise use safeLatest
+async function resolveBackfillTarget(): Promise<bigint> {
   const latest = BigInt(await callRpc(() => provider.getBlockNumber(), "getBlockNumber"));
   const safeLatest = latest > CONFIRMATIONS ? latest - CONFIRMATIONS : 0n;
+
+  // If indexer meta exists, don’t backfill beyond what indexer has “confirmed indexed”
+  const indexed = await getMeta("last_indexed_block");
+  if (indexed) {
+    const idx = BigInt(indexed);
+    return safeLatest < idx ? safeLatest : idx;
+  }
+
   return safeLatest;
 }
 
 async function main() {
-  console.log("🧱 BC400 backfill (indexer-compatible, bulk address upsert, transactional meta) شروع...");
+  console.log("🟡 BC400 backfill (indexer-compatible, bulk address upserts, monotonic meta)");
   console.log("Token:", tokenAddress);
   console.log("START_BLOCK:", START_BLOCK.toString());
 
-  let nextFrom = await resolveNextFrom();
-  if (nextFrom < START_BLOCK) nextFrom = START_BLOCK;
+  let from = await resolveBackfillFrom();
+  if (from < START_BLOCK) from = START_BLOCK;
 
-  const targetTo = await resolveTargetTo();
-  if (nextFrom > targetTo) {
-    console.log(`Nothing to backfill. nextFrom=${nextFrom} > targetTo=${targetTo}`);
+  const target = await resolveBackfillTarget();
+  console.log("Initial from:", from.toString());
+  console.log("Target (safe):", target.toString());
+
+  if (from > target) {
+    console.log("✅ Nothing to backfill (already caught up).");
     process.exit(0);
   }
 
-  console.log(`Backfill range: ${nextFrom} → ${targetTo}`);
-
-  for (let from = nextFrom; from <= targetTo; ) {
-    let to = from + (CHUNK_SIZE - 1n);
-    if (to > targetTo) to = targetTo;
-
-    console.log(`\n🔎 Scanning blocks ${from} → ${to}`);
+  for (let scanFrom = from; scanFrom <= target; scanFrom += CHUNK_SIZE) {
+    const scanTo = scanFrom + (CHUNK_SIZE - 1n) > target ? target : scanFrom + (CHUNK_SIZE - 1n);
+    console.log(`\n🔎 Backfilling ${scanFrom} → ${scanTo}`);
 
     let logs: Log[] = [];
     try {
-      logs = await getLogsRange(from, to);
+      logs = await getLogsRange(scanFrom, scanTo);
     } catch (e) {
-      console.error(`❌ getLogs failed for ${from}-${to} (will NOT advance meta)`, e);
+      console.error(`❌ getLogs failed for ${scanFrom}-${scanTo}. Will retry next run.`, e);
       throw e;
     }
 
@@ -166,7 +160,7 @@ async function main() {
       await client.query("BEGIN");
 
       if (logs.length > 0) {
-        // bulk addresses
+        // Bulk resolve all addresses
         const addrList: string[] = [];
         for (const log of logs) {
           const { from: fa, to: ta } = parseTransferLog(log);
@@ -174,7 +168,7 @@ async function main() {
         }
         const addrMap = await bulkGetOrCreateAddressIds(client, addrList);
 
-        // build arrays
+        // Build insert arrays
         const tx_hash: string[] = [];
         const log_index: number[] = [];
         const block_number: string[] = [];
@@ -236,20 +230,20 @@ async function main() {
         }
       }
 
-      // ✅ commit-safe progress
-      await setMeta(BACKFILL_META_KEY, to.toString(), client);
+      // ✅ Always advance backfill meta monotonically (even if no logs)
+      await setMeta("last_backfilled_block", scanTo.toString(), client);
 
       await client.query("COMMIT");
-      console.log(`  ✅ Updated ${BACKFILL_META_KEY} = ${to}`);
+      console.log(`  ✅ last_backfilled_block = ${scanTo}`);
     } catch (e) {
       await client.query("ROLLBACK");
-      console.error("❌ Chunk failed (rolled back). Meta not advanced.", e);
+      console.error("❌ Backfill chunk failed (rolled back):", e);
       throw e;
     } finally {
       client.release();
     }
 
-    from = to + 1n;
+    // small pause so we don’t hammer RPC
     if (SLEEP_MS > 0) await sleep(SLEEP_MS);
   }
 
@@ -258,6 +252,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("❌ Backfill failed:", err);
+  console.error("❌ Backfill crashed:", err);
   process.exit(1);
 });
