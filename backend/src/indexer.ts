@@ -14,8 +14,8 @@ if (!startBlockEnv) throw new Error("Missing start block env. Set BC400_START_BL
 
 const START_BLOCK = BigInt(startBlockEnv);
 
-// ------------------- Lock (prevents overlap with backfill) -------------------
-const LOCK_NAME = process.env.BC400_JOB_LOCK || "bc400_indexer_lock";
+// ------------------- Lock (shared with backfill) -------------------
+const LOCK_NAME = process.env.BC400_JOB_LOCK || "bc400_writer_lock";
 const LOCK_RETRY_MS = Number(process.env.BC400_LOCK_RETRY_MS || 15_000);
 
 // ------------------- Tuning -------------------
@@ -25,7 +25,6 @@ const LOOKBACK_BLOCKS = BigInt(process.env.INDEXER_LOOKBACK_BLOCKS || "25");
 const SLEEP_MS = Number(process.env.INDEXER_SLEEP_MS || "12000");
 const MAX_BLOCKTIME_CACHE = Number(process.env.INDEXER_BLOCKTIME_CACHE || "10000");
 
-// ERC-20 Transfer topic
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 
 function sleep(ms: number) {
@@ -69,11 +68,8 @@ async function getBlockTime(blockNumber: number): Promise<Date> {
     blockTimeCache.clear();
     blockTimeCache.set(blockNumber, t);
   }
-
   return t;
 }
-
-// ------------------- DB helpers -------------------
 
 async function resolveNextFrom(): Promise<bigint> {
   const meta = await getMeta("last_indexed_block");
@@ -91,7 +87,6 @@ async function bulkGetOrCreateAddressIds(
   addrs: string[]
 ): Promise<Map<string, number>> {
   if (addrs.length === 0) return new Map();
-
   const unique = Array.from(new Set(addrs.map((a) => a.toLowerCase())));
 
   await client.query(
@@ -117,28 +112,25 @@ async function bulkGetOrCreateAddressIds(
   return map;
 }
 
-// ------------------- Indexer -------------------
-
 export async function runIndexer() {
-  console.log("🟡 BC400 live indexer (safeLatest + idempotent + overlap + db lock)");
+  console.log("🟡 BC400 live indexer (safeLatest + idempotent + overlap + advisory lock)");
   console.log("Token:", tokenAddress);
   console.log("START_BLOCK:", START_BLOCK.toString());
   console.log("LOCK_NAME:", LOCK_NAME);
 
-  // ✅ Acquire job lock (prevents overlap with backfill)
+  // Acquire lock (light retry loop)
   const lockClient = await pool.connect();
-  while (true) {
-    const ok = await tryAdvisoryLock(lockClient, LOCK_NAME);
-    if (ok) break;
-
-    console.log(`🔒 Lock busy (${LOCK_NAME}). Backfill running. Sleeping ${LOCK_RETRY_MS}ms...`);
-    await sleep(LOCK_RETRY_MS);
-  }
-
   try {
+    while (true) {
+      const ok = await tryAdvisoryLock(lockClient, LOCK_NAME);
+      if (ok) break;
+
+      console.log(`🔒 Lock busy (${LOCK_NAME}). Backfill running. Sleeping ${LOCK_RETRY_MS}ms...`);
+      await sleep(LOCK_RETRY_MS);
+    }
+
     let nextFrom = await resolveNextFrom();
     if (nextFrom < START_BLOCK) nextFrom = START_BLOCK;
-
     console.log("Initial nextFrom:", nextFrom.toString());
 
     while (true) {
@@ -151,7 +143,6 @@ export async function runIndexer() {
         continue;
       }
 
-      // scan window uses overlap only for safety, but progress is based on nextFrom
       const scanFrom = nextFrom > LOOKBACK_BLOCKS ? nextFrom - LOOKBACK_BLOCKS : START_BLOCK;
       let scanTo = nextFrom + (INDEXER_BATCH_SIZE - 1n);
       if (scanTo > safeLatest) scanTo = safeLatest;
@@ -169,7 +160,6 @@ export async function runIndexer() {
 
       console.log(`  Found ${logs.length} Transfer logs`);
 
-      // Prefetch times only if needed
       if (logs.length > 0) {
         const uniqueBlocks = Array.from(new Set(logs.map((l) => Number(l.blockNumber)))).sort((a, b) => a - b);
         for (const bn of uniqueBlocks) await getBlockTime(bn);
@@ -204,8 +194,10 @@ export async function runIndexer() {
             const taId = addrMap.get(ta);
             if (!faId || !taId) throw new Error(`Address id missing fa=${fa} ta=${ta}`);
 
+            const li = Number((log as any).logIndex ?? (log as any).index ?? 0);
+
             tx_hash.push(String(log.transactionHash));
-            log_index.push(Number(log.index));
+            log_index.push(li);
             block_number.push(String(log.blockNumber));
             block_time.push(bt);
             from_id.push(faId);
@@ -248,9 +240,7 @@ export async function runIndexer() {
           }
         }
 
-        // ✅ Progress is monotonic and based on scanTo (not scanFrom)
         await setMeta("last_indexed_block", scanTo.toString(), client);
-
         await client.query("COMMIT");
       } catch (e) {
         await client.query("ROLLBACK");
@@ -261,7 +251,6 @@ export async function runIndexer() {
         client.release();
       }
 
-      // ✅ Advance progress pointer safely
       nextFrom = scanTo + 1n;
     }
   } finally {

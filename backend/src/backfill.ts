@@ -15,13 +15,15 @@ if (!startBlockEnv) throw new Error("Missing start block env. Set BC400_START_BL
 const CONFIGURED_START_BLOCK = BigInt(startBlockEnv);
 
 // ------------------- Lock (prevents overlap with indexer) -------------------
-const LOCK_NAME = process.env.BC400_JOB_LOCK || "bc400_indexer_lock";
+// IMPORTANT: indexer + backfill must share the SAME lock name
+const LOCK_NAME = process.env.BC400_JOB_LOCK || "bc400_writer_lock";
 
 // ------------------- Tuning -------------------
-const CHUNK_SIZE = BigInt(process.env.BACKFILL_CHUNK_SIZE || "4000"); // logs range window
+const CHUNK_SIZE = BigInt(process.env.BACKFILL_CHUNK_SIZE || "4000");
 const CONFIRMATIONS = BigInt(process.env.BACKFILL_CONFIRMATIONS || process.env.INDEXER_CONFIRMATIONS || "5");
-const LOOKBACK_BLOCKS = BigInt(process.env.BACKFILL_LOOKBACK_BLOCKS || "0"); // optional overlap for reorg safety
+const LOOKBACK_BLOCKS = BigInt(process.env.BACKFILL_LOOKBACK_BLOCKS || "0");
 const MAX_BLOCKTIME_CACHE = Number(process.env.BACKFILL_BLOCKTIME_CACHE || "20000");
+
 const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 
 function sleep(ms: number) {
@@ -69,7 +71,7 @@ async function getBlockTime(blockNumber: number): Promise<Date> {
   return t;
 }
 
-// -------- bulk address upsert + id fetch (same as indexer style) --------
+// -------- bulk address upsert + id fetch --------
 async function bulkGetOrCreateAddressIds(client: PoolClient, addrs: string[]): Promise<Map<string, number>> {
   if (addrs.length === 0) return new Map();
 
@@ -100,11 +102,9 @@ async function bulkGetOrCreateAddressIds(client: PoolClient, addrs: string[]): P
 
 // ------------------- Progress logic -------------------
 async function resolveStartFrom(): Promise<bigint> {
-  // backfill meta (preferred)
   const backfilled = await getMeta("last_backfilled_block");
   if (backfilled) return BigInt(backfilled) + 1n;
 
-  // older key (if you used it before)
   const scanned = await getMeta("last_scanned_block");
   if (scanned) return BigInt(scanned) + 1n;
 
@@ -112,18 +112,13 @@ async function resolveStartFrom(): Promise<bigint> {
 }
 
 async function resolveBackfillTarget(): Promise<bigint> {
-  // safeLatest protects against reorgs
   const latest = BigInt(await callRpc(() => provider.getBlockNumber(), "getBlockNumber"));
   const safeLatest = latest > CONFIRMATIONS ? latest - CONFIRMATIONS : 0n;
 
-  // IMPORTANT: never backfill past the indexer’s claimed progress
   const indexed = await getMeta("last_indexed_block");
   const indexerTip = indexed ? BigInt(indexed) : 0n;
 
-  // target = min(safeLatest, indexerTip)
   let target = safeLatest < indexerTip ? safeLatest : indexerTip;
-
-  // if indexerTip is 0 (not set yet), fall back to safeLatest
   if (!indexed) target = safeLatest;
 
   return target;
@@ -137,13 +132,12 @@ async function runBackfillOnce() {
   console.log("CHUNK_SIZE:", CHUNK_SIZE.toString(), "CONFIRMATIONS:", CONFIRMATIONS.toString());
   console.log("LOCK_NAME:", LOCK_NAME);
 
-  // ✅ Acquire lock for entire run to avoid overlap with indexer/backfill
   const lockClient = await pool.connect();
   try {
     const ok = await tryAdvisoryLock(lockClient, LOCK_NAME);
     if (!ok) {
-      console.log(`🔒 Lock busy (${LOCK_NAME}). Indexer/backfill running. Exiting to avoid CPU spike.`);
-      process.exit(0);
+      console.log(`🔒 Lock busy (${LOCK_NAME}). Another writer job running. Exiting.`);
+      return;
     }
 
     let from = await resolveStartFrom();
@@ -163,23 +157,14 @@ async function runBackfillOnce() {
       let chunkTo = chunkFrom + CHUNK_SIZE;
       if (chunkTo > target) chunkTo = target;
 
-      // Optional overlap (default 0 to save RPC)
       const scanFrom =
         LOOKBACK_BLOCKS > 0n && chunkFrom > LOOKBACK_BLOCKS ? chunkFrom - LOOKBACK_BLOCKS : chunkFrom;
 
       console.log(`\n🔎 Backfilling ${scanFrom} → ${chunkTo} (progressFrom=${chunkFrom})`);
 
-      let logs: Log[] = [];
-      try {
-        logs = await getLogsRange(scanFrom, chunkTo);
-      } catch (e) {
-        console.error(`❌ getLogs failed for ${scanFrom}-${chunkTo}`, e);
-        throw e; // do not advance meta
-      }
-
+      const logs = await getLogsRange(scanFrom, chunkTo);
       console.log(`  Found ${logs.length} Transfer logs`);
 
-      // Prefetch block times only if logs exist
       if (logs.length > 0) {
         const uniqueBlocks = Array.from(new Set(logs.map((l) => Number(l.blockNumber)))).sort((a, b) => a - b);
         for (const bn of uniqueBlocks) await getBlockTime(bn);
@@ -190,7 +175,6 @@ async function runBackfillOnce() {
         await client.query("BEGIN");
 
         if (logs.length > 0) {
-          // bulk resolve addresses once
           const addrList: string[] = [];
           for (const log of logs) {
             const { from: fa, to: ta } = parseTransferLog(log);
@@ -198,7 +182,6 @@ async function runBackfillOnce() {
           }
           const addrMap = await bulkGetOrCreateAddressIds(client, addrList);
 
-          // build insert arrays
           const tx_hash: string[] = [];
           const log_index: number[] = [];
           const block_number: string[] = [];
@@ -216,9 +199,10 @@ async function runBackfillOnce() {
             const taId = addrMap.get(ta);
             if (!faId || !taId) throw new Error(`Address id missing fa=${fa} ta=${ta}`);
 
+            const li = Number((log as any).logIndex ?? (log as any).index ?? 0);
+
             tx_hash.push(String(log.transactionHash));
-            // ethers Log uses "index" for logIndex
-            log_index.push(Number((log as any).index));
+            log_index.push(li);
             block_number.push(String(log.blockNumber));
             block_time.push(bt);
             from_id.push(faId);
@@ -226,7 +210,6 @@ async function runBackfillOnce() {
             raw_amount.push(rawAmount.toString());
           }
 
-          // insert in batches
           const BATCH_ROWS = 1000;
           for (let i = 0; i < tx_hash.length; i += BATCH_ROWS) {
             const j = Math.min(i + BATCH_ROWS, tx_hash.length);
@@ -262,10 +245,7 @@ async function runBackfillOnce() {
           }
         }
 
-        // ✅ Monotonic progress based on chunkTo (not scanFrom)
         await setMeta("last_backfilled_block", chunkTo.toString(), client);
-
-        // Optional: keep legacy key updated too (harmless)
         await setMeta("last_scanned_block", chunkTo.toString(), client);
 
         await client.query("COMMIT");
