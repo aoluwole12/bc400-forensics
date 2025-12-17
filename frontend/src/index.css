@@ -49,7 +49,8 @@ body {
 }
 
 .app-shell {
-  max-width: 1320px;
+  max-width: 1700px; /* was 1320px */
+  width: 100%;
   margin: 0 auto;
   border-radius: 28px;
   padding: 24px 26px 32px;
@@ -60,7 +61,6 @@ body {
   box-shadow: var(--bc-shadow-soft);
   border: 1px solid rgba(0, 0, 0, 0.7);
 }
-
 /* Header */
 
 .app-header {
@@ -206,10 +206,10 @@ body {
 
 .panel-title {
   margin: 0 0 8px;
-  font-size: 12px;
+  font-size: 20px;
   text-transform: uppercase;
   letter-spacing: 0.18em;
-  color: #3a2f12;
+  color: #A855F7;
 }
 
 .panel-title--index {
@@ -860,4 +860,149 @@ body {
   opacity: 0.85;
   font-size: 12px;
 }
+
+/* =========================
+   Stats cards (Daily Audit) — matches the “last two pics” layout
+   Works with src/components/StatsGrid + StatsCard
+   ========================= */
+
+/* Your existing .stats-grid is used for dt/dd.
+   This makes it also work when the children are <article class="stats-card"> */
+.stats-grid > .stats-card {
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.08);
+}
+
+/* Label (small uppercase) */
+.stats-card-label {
+  font-size: 15px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #5b4b18;
+  line-height: 1.05;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Value (big + strong like your screenshots) */
+.stats-card-value {
+  margin-top: 8px;
+  font-size: 20px;
+  font-weight: 900;
+  color: #ffffff;
+  text-shadow: 0 0 18px rgba(0, 0, 0, 0.9);
+  white-space: pre-line; /* enables \n in value */
+}
+
+/* Helper text (small line under the value) */
+.stats-card-helper {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #5e501e;
+  line-height: 1.25;
+  opacity: 0.95;
+}
+
+/* Optional: tighter spacing when cards are used */
+.stats-grid {
+  gap: 10px;
+}
+
+/* Keep your dt/dd layout clean (doesn't affect cards) */
+.stats-grid dt,
+.stats-grid dd {
+  white-space: normal;
+}
+
+/* =========================
+   Daily Audit "header box" only (the one with 3 tiles)
+   ========================= */
+
+/* This targets the FIRST .panel-block on the Daily Audit page */
+.panel--status .panel-block:first-child {
+  width: min(2200px, 100%);   /* <-- increase length here */
+  margin: 0 auto;            /* keeps it centered */
+}
+
+/* Make the 3 tiles inside that box stretch evenly */
+.panel--status .panel-block:first-child > .stats-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+  gap: 14px 18px;
+  width: 100%;
+}
+
+/* Keep the 3 tiles looking proportional */
+.panel--status .panel-block:first-child > .stats-grid > div {
+  min-width: 0;
+}
+
+/* Mobile: stack */
+@media (max-width: 960px) {
+  .panel--status .panel-block:first-child {
+    width: 100%;
+  }
+  .panel--status .panel-block:first-child > .stats-grid {
+    grid-template-columns: 1fr !important;
+  }
+}
+/* =========================
+   Daily Audit: actions outside the box (right side)
+   ========================= */
+
+.panel--status {
+  display: grid;
+  grid-template-columns: 1fr auto; /* box takes all space, buttons take only what they need */
+  align-items: start;
+  gap: 12px;
+}
+
+/* Button wrapper */
+.daily-audit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 6px; /* small drop so it lines up with header area */
+}
+
+/* Rounded pill buttons */
+.pill-action-btn {
+  border-radius: 999px;
+  padding: 8px 14px;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.78);
+  color: #ffd936;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.pill-action-btn:hover {
+  background: #000;
+}
+
+.pill-action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* On mobile: stack buttons BELOW the box */
+@media (max-width: 960px) {
+  .panel--status {
+    grid-template-columns: 1fr;
+  }
+
+  .daily-audit-actions {
+    justify-content: flex-start;
+    padding-top: 0;
+  }
+}
+
 

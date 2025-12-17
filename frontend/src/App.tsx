@@ -1,7 +1,6 @@
-import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import DashboardPage from "./pages/DashboardPage";
-import { DailyAuditPage } from "./pages/DailyAuditPage";
+import DailyAuditPage from "./pages/DailyAuditPage";
 
 export default function App() {
   return (
