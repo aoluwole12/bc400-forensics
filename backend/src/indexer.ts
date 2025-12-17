@@ -3,6 +3,7 @@ import { ethers } from "ethers";
 import { pool, getMeta, setMeta } from "./db";
 import { callRpc, provider } from "./clients/bscClient";
 import type { PoolClient } from "pg";
+import { tryAdvisoryLock, advisoryUnlock } from "./dbLocks";
 
 // ------------------- Env (supports Render + local) -------------------
 const tokenAddress = (process.env.BC400_TOKEN_ADDRESS || process.env.TOKEN_ADDRESS || "").toLowerCase();
@@ -12,6 +13,10 @@ if (!tokenAddress) throw new Error("Missing token address env. Set BC400_TOKEN_A
 if (!startBlockEnv) throw new Error("Missing start block env. Set BC400_START_BLOCK or START_BLOCK");
 
 const START_BLOCK = BigInt(startBlockEnv);
+
+// ------------------- Lock (prevents overlap with backfill) -------------------
+const LOCK_NAME = process.env.BC400_JOB_LOCK || "bc400_indexer_lock";
+const LOCK_RETRY_MS = Number(process.env.BC400_LOCK_RETRY_MS || 15_000);
 
 // ------------------- Tuning -------------------
 const INDEXER_BATCH_SIZE = BigInt(process.env.INDEXER_BATCH_SIZE || "2000");
@@ -115,137 +120,155 @@ async function bulkGetOrCreateAddressIds(
 // ------------------- Indexer -------------------
 
 export async function runIndexer() {
-  console.log("🟡 BC400 live indexer (safeLatest + idempotent + correct overlap)");
+  console.log("🟡 BC400 live indexer (safeLatest + idempotent + overlap + db lock)");
   console.log("Token:", tokenAddress);
   console.log("START_BLOCK:", START_BLOCK.toString());
+  console.log("LOCK_NAME:", LOCK_NAME);
 
-  let nextFrom = await resolveNextFrom();
-  if (nextFrom < START_BLOCK) nextFrom = START_BLOCK;
-
-  console.log("Initial nextFrom:", nextFrom.toString());
-
+  // ✅ Acquire job lock (prevents overlap with backfill)
+  const lockClient = await pool.connect();
   while (true) {
-    const latest = BigInt(await callRpc(() => provider.getBlockNumber(), "getBlockNumber"));
-    const safeLatest = latest > CONFIRMATIONS ? latest - CONFIRMATIONS : 0n;
+    const ok = await tryAdvisoryLock(lockClient, LOCK_NAME);
+    if (ok) break;
 
-    if (nextFrom > safeLatest) {
-      console.log(`Up to date. latest=${latest} safeLatest=${safeLatest}. Sleeping ${SLEEP_MS}ms...`);
-      await sleep(SLEEP_MS);
-      continue;
-    }
+    console.log(`🔒 Lock busy (${LOCK_NAME}). Backfill running. Sleeping ${LOCK_RETRY_MS}ms...`);
+    await sleep(LOCK_RETRY_MS);
+  }
 
-    // scan window uses overlap only for safety, but progress is based on nextFrom
-    const scanFrom = nextFrom > LOOKBACK_BLOCKS ? nextFrom - LOOKBACK_BLOCKS : START_BLOCK;
-    let scanTo = nextFrom + (INDEXER_BATCH_SIZE - 1n);
-    if (scanTo > safeLatest) scanTo = safeLatest;
+  try {
+    let nextFrom = await resolveNextFrom();
+    if (nextFrom < START_BLOCK) nextFrom = START_BLOCK;
 
-    console.log(`Scanning ${scanFrom} → ${scanTo} (nextFrom=${nextFrom}, safeLatest=${safeLatest})`);
+    console.log("Initial nextFrom:", nextFrom.toString());
 
-    let logs: any[] = [];
-    try {
-      logs = await getLogsRange(scanFrom, scanTo);
-    } catch (err) {
-      console.error("getLogs failed (retry after 5s):", err);
-      await sleep(5000);
-      continue;
-    }
+    while (true) {
+      const latest = BigInt(await callRpc(() => provider.getBlockNumber(), "getBlockNumber"));
+      const safeLatest = latest > CONFIRMATIONS ? latest - CONFIRMATIONS : 0n;
 
-    console.log(`  Found ${logs.length} Transfer logs`);
-
-    // Prefetch times only if needed
-    if (logs.length > 0) {
-      const uniqueBlocks = Array.from(new Set(logs.map((l) => Number(l.blockNumber)))).sort((a, b) => a - b);
-      for (const bn of uniqueBlocks) await getBlockTime(bn);
-    }
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-
-      if (logs.length > 0) {
-        const addrList: string[] = [];
-        for (const log of logs) {
-          const { from: fa, to: ta } = parseTransferLog(log);
-          addrList.push(fa, ta);
-        }
-        const addrMap = await bulkGetOrCreateAddressIds(client, addrList);
-
-        const tx_hash: string[] = [];
-        const log_index: number[] = [];
-        const block_number: string[] = [];
-        const block_time: Date[] = [];
-        const from_id: number[] = [];
-        const to_id: number[] = [];
-        const raw_amount: string[] = [];
-
-        for (const log of logs) {
-          const { from: fa, to: ta, rawAmount } = parseTransferLog(log);
-          const bn = Number(log.blockNumber);
-          const bt = blockTimeCache.get(bn) || (await getBlockTime(bn));
-
-          const faId = addrMap.get(fa);
-          const taId = addrMap.get(ta);
-          if (!faId || !taId) throw new Error(`Address id missing fa=${fa} ta=${ta}`);
-
-          tx_hash.push(String(log.transactionHash));
-          log_index.push(Number(log.index));
-          block_number.push(String(log.blockNumber));
-          block_time.push(bt);
-          from_id.push(faId);
-          to_id.push(taId);
-          raw_amount.push(rawAmount.toString());
-        }
-
-        const BATCH_ROWS = 1000;
-        for (let i = 0; i < tx_hash.length; i += BATCH_ROWS) {
-          const j = Math.min(i + BATCH_ROWS, tx_hash.length);
-
-          await client.query(
-            `
-            INSERT INTO transfers (
-              tx_hash, log_index, block_number, block_time,
-              from_address_id, to_address_id, raw_amount
-            )
-            SELECT *
-            FROM UNNEST(
-              $1::text[],
-              $2::int[],
-              $3::bigint[],
-              $4::timestamptz[],
-              $5::int[],
-              $6::int[],
-              $7::text[]
-            )
-            ON CONFLICT (tx_hash, log_index) DO NOTHING
-            `,
-            [
-              tx_hash.slice(i, j),
-              log_index.slice(i, j),
-              block_number.slice(i, j).map((x) => BigInt(x).toString()),
-              block_time.slice(i, j),
-              from_id.slice(i, j),
-              to_id.slice(i, j),
-              raw_amount.slice(i, j),
-            ]
-          );
-        }
+      if (nextFrom > safeLatest) {
+        console.log(`Up to date. latest=${latest} safeLatest=${safeLatest}. Sleeping ${SLEEP_MS}ms...`);
+        await sleep(SLEEP_MS);
+        continue;
       }
 
-      // ✅ Progress is monotonic and based on scanTo (not scanFrom)
-      await setMeta("last_indexed_block", scanTo.toString(), client);
+      // scan window uses overlap only for safety, but progress is based on nextFrom
+      const scanFrom = nextFrom > LOOKBACK_BLOCKS ? nextFrom - LOOKBACK_BLOCKS : START_BLOCK;
+      let scanTo = nextFrom + (INDEXER_BATCH_SIZE - 1n);
+      if (scanTo > safeLatest) scanTo = safeLatest;
 
-      await client.query("COMMIT");
-    } catch (e) {
-      await client.query("ROLLBACK");
-      console.error("Indexer chunk failed (rolled back):", e);
-      await sleep(5000);
-      continue;
-    } finally {
-      client.release();
+      console.log(`Scanning ${scanFrom} → ${scanTo} (nextFrom=${nextFrom}, safeLatest=${safeLatest})`);
+
+      let logs: any[] = [];
+      try {
+        logs = await getLogsRange(scanFrom, scanTo);
+      } catch (err) {
+        console.error("getLogs failed (retry after 5s):", err);
+        await sleep(5000);
+        continue;
+      }
+
+      console.log(`  Found ${logs.length} Transfer logs`);
+
+      // Prefetch times only if needed
+      if (logs.length > 0) {
+        const uniqueBlocks = Array.from(new Set(logs.map((l) => Number(l.blockNumber)))).sort((a, b) => a - b);
+        for (const bn of uniqueBlocks) await getBlockTime(bn);
+      }
+
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        if (logs.length > 0) {
+          const addrList: string[] = [];
+          for (const log of logs) {
+            const { from: fa, to: ta } = parseTransferLog(log);
+            addrList.push(fa, ta);
+          }
+          const addrMap = await bulkGetOrCreateAddressIds(client, addrList);
+
+          const tx_hash: string[] = [];
+          const log_index: number[] = [];
+          const block_number: string[] = [];
+          const block_time: Date[] = [];
+          const from_id: number[] = [];
+          const to_id: number[] = [];
+          const raw_amount: string[] = [];
+
+          for (const log of logs) {
+            const { from: fa, to: ta, rawAmount } = parseTransferLog(log);
+            const bn = Number(log.blockNumber);
+            const bt = blockTimeCache.get(bn) || (await getBlockTime(bn));
+
+            const faId = addrMap.get(fa);
+            const taId = addrMap.get(ta);
+            if (!faId || !taId) throw new Error(`Address id missing fa=${fa} ta=${ta}`);
+
+            tx_hash.push(String(log.transactionHash));
+            log_index.push(Number(log.index));
+            block_number.push(String(log.blockNumber));
+            block_time.push(bt);
+            from_id.push(faId);
+            to_id.push(taId);
+            raw_amount.push(rawAmount.toString());
+          }
+
+          const BATCH_ROWS = 1000;
+          for (let i = 0; i < tx_hash.length; i += BATCH_ROWS) {
+            const j = Math.min(i + BATCH_ROWS, tx_hash.length);
+
+            await client.query(
+              `
+              INSERT INTO transfers (
+                tx_hash, log_index, block_number, block_time,
+                from_address_id, to_address_id, raw_amount
+              )
+              SELECT *
+              FROM UNNEST(
+                $1::text[],
+                $2::int[],
+                $3::bigint[],
+                $4::timestamptz[],
+                $5::int[],
+                $6::int[],
+                $7::text[]
+              )
+              ON CONFLICT (tx_hash, log_index) DO NOTHING
+              `,
+              [
+                tx_hash.slice(i, j),
+                log_index.slice(i, j),
+                block_number.slice(i, j).map((x) => BigInt(x).toString()),
+                block_time.slice(i, j),
+                from_id.slice(i, j),
+                to_id.slice(i, j),
+                raw_amount.slice(i, j),
+              ]
+            );
+          }
+        }
+
+        // ✅ Progress is monotonic and based on scanTo (not scanFrom)
+        await setMeta("last_indexed_block", scanTo.toString(), client);
+
+        await client.query("COMMIT");
+      } catch (e) {
+        await client.query("ROLLBACK");
+        console.error("Indexer chunk failed (rolled back):", e);
+        await sleep(5000);
+        continue;
+      } finally {
+        client.release();
+      }
+
+      // ✅ Advance progress pointer safely
+      nextFrom = scanTo + 1n;
     }
-
-    // ✅ Advance progress pointer safely
-    nextFrom = scanTo + 1n;
+  } finally {
+    try {
+      await advisoryUnlock(lockClient, LOCK_NAME);
+    } catch {}
+    lockClient.release();
   }
 }
 
