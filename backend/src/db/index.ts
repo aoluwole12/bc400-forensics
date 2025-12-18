@@ -7,10 +7,8 @@ dotenv.config();
 const host = process.env.PGHOST || process.env.DB_HOST || "localhost";
 const port = Number(process.env.PGPORT || process.env.DB_PORT || 5432);
 const user = process.env.PGUSER || process.env.DB_USER || "bc400";
-const password =
-  process.env.PGPASSWORD || process.env.DB_PASSWORD || "bc400password";
-const database =
-  process.env.PGDATABASE || process.env.DB_NAME || "bc400_forensics";
+const password = process.env.PGPASSWORD || process.env.DB_PASSWORD || "bc400password";
+const database = process.env.PGDATABASE || process.env.DB_NAME || "bc400_forensics";
 
 export const pool = new Pool({
   host,
@@ -45,14 +43,15 @@ export async function getOrCreateAddress(
       [lower]
     );
 
-    if (existing.rowCount > 0) {
-      const row = existing.rows[0];
-      const first = row.first_seen_block
-        ? BigInt(row.first_seen_block)
-        : blockNumber;
-      const last = row.last_seen_block
-        ? BigInt(row.last_seen_block)
-        : blockNumber;
+    if ((existing.rowCount ?? 0) > 0) {
+      const row = existing.rows[0] as {
+        id: number;
+        first_seen_block: string | null;
+        last_seen_block: string | null;
+      };
+
+      const first = row.first_seen_block ? BigInt(row.first_seen_block) : blockNumber;
+      const last = row.last_seen_block ? BigInt(row.last_seen_block) : blockNumber;
 
       const newFirst = blockNumber < first ? blockNumber : first;
       const newLast = blockNumber > last ? blockNumber : last;
@@ -66,22 +65,18 @@ export async function getOrCreateAddress(
       );
 
       await client.query("COMMIT");
-      return updated.rows[0].id;
-    } else {
-      const insert = await client.query(
-        `INSERT INTO addresses (address, first_seen_block, last_seen_block)
-         VALUES ($1, $2, $3)
-         RETURNING id`,
-        [
-          lower,
-          blockNumber.toString(),
-          blockNumber.toString(),
-        ]
-      );
-
-      await client.query("COMMIT");
-      return insert.rows[0].id;
+      return updated.rows[0].id as number;
     }
+
+    const insert = await client.query(
+      `INSERT INTO addresses (address, first_seen_block, last_seen_block)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [lower, blockNumber.toString(), blockNumber.toString()]
+    );
+
+    await client.query("COMMIT");
+    return insert.rows[0].id as number;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;

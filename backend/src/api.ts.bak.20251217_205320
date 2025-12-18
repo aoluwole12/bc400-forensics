@@ -1,11 +1,11 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import type { Request, Response } from "express";
 import { pool } from "./db";
+import { JsonRpcProvider, Contract } from "ethers";
 
+// ✅ NEW: route registrars (files must exist in src/routes/)
 import { registerDexPriceRoute } from "./routes/dexPrice";
-import { registerLpLockRoute } from "./routes/lpLock";
 import { registerSecurityRulesRoute } from "./routes/securityRules";
 
 const PORT = Number(process.env.PORT || 4000);
@@ -14,7 +14,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-function handleError(res: Response, where: string, err: unknown) {
+// ----------------------
+// Small helper for logging + consistent error JSON
+// ----------------------
+function handleError(res: express.Response, where: string, err: unknown) {
   console.error(`Error in ${where}:`, err);
   res.status(500).json({
     error: `Failed to load ${where}`,
@@ -22,8 +25,48 @@ function handleError(res: Response, where: string, err: unknown) {
   });
 }
 
-// Root homepage
-app.get("/", (_req: Request, res: Response) => {
+// ----------------------
+// Chain constants (no env required)
+// ----------------------
+// Your BC400 token CA (fallback if env not present)
+const BC400_TOKEN =
+  (process.env.BC400_TOKEN_ADDRESS || "0x61Fc93c7C070B32B1b1479B86056d8Ec1D7125BD").toLowerCase();
+
+// WBNB (canonical)
+const WBNB_TOKEN = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c".toLowerCase();
+
+// PancakeSwap v2 Factory (BSC)
+const PANCAKE_V2_FACTORY = "0xCA143Ce32Fe78f1f7019d7d551a6402fC5350c73";
+
+// Dead + zero burn addresses
+const DEAD = "0x000000000000000000000000000000000000dEaD";
+const ZERO = "0x0000000000000000000000000000000000000000";
+
+// Provider (no env required)
+function getProvider() {
+  const rpc =
+    process.env.RPC_URL ||
+    process.env.BSC_RPC_URL ||
+    process.env.NODEREAL_HTTP ||
+    "https://bsc-dataseed.binance.org/";
+  return new JsonRpcProvider(rpc);
+}
+
+const ERC20_ABI = [
+  "function symbol() view returns (string)",
+  "function decimals() view returns (uint8)",
+  "function totalSupply() view returns (uint256)",
+  "function balanceOf(address) view returns (uint256)",
+];
+
+const FACTORY_ABI = [
+  "function getPair(address tokenA, address tokenB) external view returns (address pair)",
+];
+
+// ----------------------
+// Root homepage (fixes "Cannot GET /")
+// ----------------------
+app.get("/", (_req, res) => {
   res.status(200).type("html").send(`
 <!doctype html>
 <html lang="en">
@@ -50,19 +93,23 @@ app.get("/", (_req: Request, res: Response) => {
       <li><a href="/summary"><code>/summary</code></a> (and <a href="/api/summary"><code>/api/summary</code></a>)</li>
       <li><a href="/top-holders"><code>/top-holders</code></a> (and <a href="/api/top-holders"><code>/api/top-holders</code></a>)</li>
       <li><a href="/transfers"><code>/transfers</code></a> (and <a href="/api/transfers"><code>/api/transfers</code></a>)</li>
-      <li><a href="/dex/price"><code>/dex/price</code></a> (and <a href="/api/dex/price"><code>/api/dex/price</code></a>)</li>
+      <li><a href="/dex/price"><code>/dex/price</code></a></li>
       <li><a href="/lp/lock"><code>/lp/lock</code></a> (and <a href="/api/lp/lock"><code>/api/lp/lock</code></a>)</li>
-      <li><a href="/security/rules"><code>/security/rules</code></a> (and <a href="/api/security/rules"><code>/api/security/rules</code></a>)</li>
+      <li><a href="/security/rules"><code>/security/rules</code></a></li>
     </ul>
-    <p class="muted" style="margin-top: 14px;">Note: <code>/sql</code> is POST-only (SELECT-only).</p>
+    <p class="muted" style="margin-top: 14px;">
+      Note: <code>/sql</code> is POST-only (SELECT-only).
+    </p>
   </div>
 </body>
 </html>
   `);
 });
 
-// Health check
-async function healthHandler(_req: Request, res: Response) {
+// ----------------------
+// Health check (support both /health and /api/health)
+// ----------------------
+async function healthHandler(_req: express.Request, res: express.Response) {
   try {
     const client = await pool.connect();
     client.release();
@@ -74,23 +121,28 @@ async function healthHandler(_req: Request, res: Response) {
 app.get("/health", healthHandler);
 app.get("/api/health", healthHandler);
 
-// Summary
-async function summaryHandler(_req: Request, res: Response) {
+// ----------------------
+// /summary – chain snapshot (support /api/summary too)
+// ----------------------
+async function summaryHandler(_req: express.Request, res: express.Response) {
   const client = await pool.connect();
   try {
     const stats = await client.query<{
       first_block: string | null;
       last_block: string | null;
       total_transfers: string;
-    }>(`
+    }>(
+      `
       SELECT
         MIN(block_number)::bigint AS first_block,
         MAX(block_number)::bigint AS last_block,
         COUNT(*)::bigint          AS total_transfers
       FROM transfers;
-    `);
+      `
+    );
 
     const row = stats.rows[0];
+
     const wallets = await client.query<{ total_wallets: string }>(
       `SELECT COUNT(*)::bigint AS total_wallets FROM addresses;`
     );
@@ -110,11 +162,13 @@ async function summaryHandler(_req: Request, res: Response) {
 app.get("/summary", summaryHandler);
 app.get("/api/summary", summaryHandler);
 
-// Top holders
-async function topHoldersHandler(req: Request, res: Response) {
+// ----------------------
+// /top-holders – from holder_balances snapshot (support /api/top-holders too)
+// ----------------------
+async function topHoldersHandler(req: express.Request, res: express.Response) {
   const client = await pool.connect();
   try {
-    const limit = Math.min(Math.max(Number(req.query.limit) || 25, 1), 200);
+    const limit = Math.min(Mathmax(Number(req.query.limit) || 25, 1), 200);
 
     const result = await client.query<{
       address_id: number;
@@ -143,7 +197,8 @@ async function topHoldersHandler(req: Request, res: Response) {
         hb.last_block_time,
         hb.last_tx_hash
       FROM holder_balances hb
-      JOIN addresses a ON a.id = hb.address_id
+      JOIN addresses a
+        ON a.id = hb.address_id
       WHERE hb.balance_bc400 > 0
       ORDER BY hb.balance_bc400 DESC
       LIMIT $1;
@@ -176,8 +231,10 @@ async function topHoldersHandler(req: Request, res: Response) {
 app.get("/top-holders", topHoldersHandler);
 app.get("/api/top-holders", topHoldersHandler);
 
-// Transfers
-async function transfersHandler(req: Request, res: Response) {
+// ----------------------
+// /transfers – recent transfers (support /api/transfers too)
+// ----------------------
+async function transfersHandler(req: express.Request, res: express.Response) {
   const client = await pool.connect();
   try {
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
@@ -228,14 +285,106 @@ async function transfersHandler(req: Request, res: Response) {
 app.get("/transfers", transfersHandler);
 app.get("/api/transfers", transfersHandler);
 
-// SQL console
-app.post("/sql", async (req: Request, res: Response) => {
+// ----------------------
+// /lp/lock – LP burn % + risk label (NO env vars required)
+// Auto-detects the PancakeSwap v2 pair for BC400/WBNB
+// ----------------------
+async function lpLockHandler(_req: express.Request, res: express.Response) {
+  try {
+    const provider = getProvider();
+
+    const factory = new Contract(PANCAKE_V2_FACTORY, FACTORY_ABI, provider);
+    const pairAddress: string = await factory.getPair(BC400_TOKEN, WBNB_TOKEN);
+
+    const isZeroPair =
+      !pairAddress || pairAddress.toLowerCase() === ZERO.toLowerCase();
+
+    if (isZeroPair) {
+      return res.json({
+        ok: true,
+        pairFound: false,
+        reason: "No PancakeSwap v2 pair found for BC400/WBNB",
+        token: { address: BC400_TOKEN },
+        wbnb: { address: WBNB_TOKEN },
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const lp = new Contract(pairAddress, ERC20_ABI, provider);
+
+    const [symbol, decimals, totalSupply, deadBal, zeroBal] = await Promise.all([
+      lp.symbol().catch(() => "LP"),
+      lp.decimals().catch(() => 18),
+      lp.totalSupply(),
+      lp.balanceOf(DEAD),
+      lp.balanceOf(ZERO),
+    ]);
+
+    const burned = deadBal + zeroBal;
+    const burnedPct =
+      totalSupply > 0n ? Number((burned * 1000000n) / totalSupply) / 10000 : 0; // 4dp
+
+    const mode = burnedPct >= 90 ? "burned" : "not-burned";
+
+    let riskLabel: "LOW" | "MEDIUM" | "HIGH" = "MEDIUM";
+    if (burnedPct >= 90) riskLabel = "LOW";
+    else if (burnedPct < 50) riskLabel = "HIGH";
+
+    res.json({
+      ok: true,
+      pairFound: true,
+      dex: "PancakeSwap v2",
+      pairAddress,
+      lp: {
+        symbol,
+        decimals,
+      },
+      burn: {
+        dead: DEAD,
+        zero: ZERO,
+        totalSupplyRaw: totalSupply.toString(),
+        burnedRaw: burned.toString(),
+        burnedPct,
+        mode,
+      },
+      lock: {
+        detected: false,
+        note:
+          "No locker detection in this minimal version (no external APIs). We only report burn % on-chain.",
+      },
+      risk: {
+        label: riskLabel,
+        note:
+          riskLabel === "LOW"
+            ? "LP appears strongly burned (good anti-rug signal)."
+            : riskLabel === "HIGH"
+            ? "LP burn % is low. Liquidity may be withdrawable unless locked elsewhere."
+            : "LP burn % is moderate. Could be partially burned or held elsewhere.",
+      },
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    handleError(res, "lp/lock", err);
+  }
+}
+app.get("/lp/lock", lpLockHandler);
+app.get("/api/lp/lock", lpLockHandler);
+
+// ✅ NEW: wire these routes (must exist in src/routes/)
+registerDexPriceRoute(app);
+registerSecurityRulesRoute(app, pool);
+
+// ----------------------
+// /sql – simple SELECT-only console
+// ----------------------
+app.post("/sql", async (req, res) => {
   const client = await pool.connect();
   try {
-    const sql = String((req.body as any)?.sql || "").trim();
+    const sql = String(req.body?.sql || "").trim();
     if (!sql.toLowerCase().startsWith("select")) {
       return res.status(400).json({ error: "Only SELECT queries are allowed" });
     }
+
     const result = await client.query(sql);
     res.json({
       rowCount: result.rowCount,
@@ -249,11 +398,14 @@ app.post("/sql", async (req: Request, res: Response) => {
   }
 });
 
-// ✅ Route modules (this is what your frontend calls)
-registerDexPriceRoute(app);
-registerLpLockRoute(app);
-registerSecurityRulesRoute(app, pool);
-
+// ----------------------
+// Start server
+// ----------------------
 app.listen(PORT, () => {
   console.log(`BC400 API listening on http://localhost:${PORT}`);
 });
+
+// Small helper: your original had Math.max; fix typo protection
+function Mathmax(a: number, b: number) {
+  return Math.max(a, b);
+}
