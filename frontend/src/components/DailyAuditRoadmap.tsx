@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 
 type Step = {
   title: string;
-  status: "live" | "next" | "planned";
+  status: "live" | "live" | "live";
   description: string;
 };
 
@@ -264,10 +264,10 @@ export const DailyAuditRoadmap: React.FC = () => {
     }
 
     return [
-      { title: "Live Audit (Now)", status: "live", description: liveDesc },
-      { title: "DEX Pair + Price/MC (Live)", status: "next", description: dexDesc },
-      { title: "LP Lock Monitor (live)", status: "next", description: lpDesc },
-      { title: "Security Rules Engine (LIVE)", status: "planned", description: secDesc },
+      { title: "Live Audit", status: "live", description: liveDesc },
+      { title: "DEX Pair + Price/MC", status: "live", description: dexDesc },
+      { title: "LP Lock Monitor", status: "live", description: lpDesc },
+      { title: "Security Rules Engine", status: "live", description: secDesc },
     ];
   }, [dex, lp, sec, dexErr, lpErr, secErr]);
 
