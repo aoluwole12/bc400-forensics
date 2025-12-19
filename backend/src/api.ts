@@ -11,7 +11,33 @@ import { registerSecurityRulesRoute } from "./routes/securityRules";
 const PORT = Number(process.env.PORT || 4000);
 
 const app = express();
-app.use(cors());
+
+// ✅ CORS: allow your production frontend + local dev
+const allowedOrigins = [
+  "https://www.bc400forensics.com",
+  "https://bc400forensics.com",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // allow non-browser calls (curl, server-to-server) where origin is undefined
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+
+      return callback(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+// ✅ handle preflight
+app.options("*", cors());
+
 app.use(express.json());
 
 function handleError(res: Response, where: string, err: unknown) {
