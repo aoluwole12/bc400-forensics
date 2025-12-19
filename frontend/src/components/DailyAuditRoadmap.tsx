@@ -265,9 +265,9 @@ export const DailyAuditRoadmap: React.FC = () => {
 
     return [
       { title: "Live Audit (Now)", status: "live", description: liveDesc },
-      { title: "DEX Pair + Price/MC (Next)", status: "next", description: dexDesc },
-      { title: "LP Lock Monitor (Next)", status: "next", description: lpDesc },
-      { title: "Security Rules Engine (Planned)", status: "planned", description: secDesc },
+      { title: "DEX Pair + Price/MC (Live)", status: "next", description: dexDesc },
+      { title: "LP Lock Monitor (live)", status: "next", description: lpDesc },
+      { title: "Security Rules Engine (LIVE)", status: "planned", description: secDesc },
     ];
   }, [dex, lp, sec, dexErr, lpErr, secErr]);
 
