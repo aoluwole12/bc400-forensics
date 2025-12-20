@@ -7,6 +7,7 @@ import { pool } from "./db";
 import { registerDexPriceRoute } from "./routes/dexPrice";
 import { registerLpLockRoute } from "./routes/lpLock";
 import { registerSecurityRulesRoute } from "./routes/securityRules";
+import { registerLatestTransfersRoute } from "./routes/transfersLatest";
 
 const PORT = Number(process.env.PORT || 4000);
 
@@ -75,7 +76,10 @@ app.get("/", (_req: Request, res: Response) => {
       <li><a href="/health"><code>/health</code></a> (and <a href="/api/health"><code>/api/health</code></a>)</li>
       <li><a href="/summary"><code>/summary</code></a> (and <a href="/api/summary"><code>/api/summary</code></a>)</li>
       <li><a href="/top-holders"><code>/top-holders</code></a> (and <a href="/api/top-holders"><code>/api/top-holders</code></a>)</li>
+
       <li><a href="/transfers"><code>/transfers</code></a> (and <a href="/api/transfers"><code>/api/transfers</code></a>)</li>
+      <li><a href="/transfers/latest"><code>/transfers/latest</code></a> (and <a href="/api/transfers/latest"><code>/api/transfers/latest</code></a>)</li>
+
       <li><a href="/dex/price"><code>/dex/price</code></a> (and <a href="/api/dex/price"><code>/api/dex/price</code></a>)</li>
       <li><a href="/lp/lock"><code>/lp/lock</code></a> (and <a href="/api/lp/lock"><code>/api/lp/lock</code></a>)</li>
       <li><a href="/security/rules"><code>/security/rules</code></a> (and <a href="/api/security/rules"><code>/api/security/rules</code></a>)</li>
@@ -202,7 +206,7 @@ async function topHoldersHandler(req: Request, res: Response) {
 app.get("/top-holders", topHoldersHandler);
 app.get("/api/top-holders", topHoldersHandler);
 
-// Transfers
+// Transfers (simple latest list)
 async function transfersHandler(req: Request, res: Response) {
   const client = await pool.connect();
   try {
@@ -279,6 +283,9 @@ app.post("/sql", async (req: Request, res: Response) => {
 registerDexPriceRoute(app);
 registerLpLockRoute(app);
 registerSecurityRulesRoute(app, pool);
+
+// ✅ Latest transfers (cursor pagination)
+registerLatestTransfersRoute(app, pool);
 
 app.listen(PORT, () => {
   console.log(`BC400 API listening on http://localhost:${PORT}`);

@@ -134,6 +134,25 @@ type Transfer = {
   to_address: string;
   amount_bc400: string | null; // fallback human
   amount_raw?: string | null; // preferred raw
+
+  // extra fields (useful later)
+  tx_hash?: string | null;
+  log_index?: number | null;
+};
+
+type LatestCursor = { blockNumber: number; logIndex: number } | null;
+
+type LatestTransfersResponse = {
+  items: Array<{
+    tx_hash: string;
+    log_index: number;
+    block_number: number;
+    block_time: string | null;
+    from_address: string;
+    to_address: string;
+    raw_amount: string;
+  }>;
+  nextCursor: LatestCursor;
 };
 
 function normalizeHolder(raw: any, index: number): Holder {
@@ -151,8 +170,12 @@ function normalizeTransfer(raw: any): Transfer {
     block_time: raw.block_time ?? raw.blockTime ?? raw.time ?? null,
     from_address: raw.from_address ?? raw.fromAddress ?? raw.from ?? "",
     to_address: raw.to_address ?? raw.toAddress ?? raw.to ?? "",
-    amount_bc400: raw.amount_bc400 ?? raw.amountBC400 ?? raw.amount ?? raw.value ?? null,
-    amount_raw: raw.raw_amount ?? raw.rawAmount ?? raw.amount_raw ?? null,
+    amount_bc400:
+      raw.amount_bc400 ?? raw.amountBC400 ?? raw.amount ?? raw.value ?? null,
+    amount_raw:
+      raw.raw_amount ?? raw.rawAmount ?? raw.amount_raw ?? raw.rawAmount18 ?? null,
+    tx_hash: raw.tx_hash ?? raw.txHash ?? null,
+    log_index: raw.log_index ?? raw.logIndex ?? null,
   };
 }
 
@@ -160,6 +183,53 @@ function parseISO(iso: string | null) {
   if (!iso) return null;
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Pulls transfers using /transfers/latest cursor pagination until:
+ * - we cover at least last 24h (based on oldest row time), OR
+ * - we hit maxPages / maxItems safety caps
+ */
+async function fetchLatestTransfersCovering24h(): Promise<{
+  transfers: Transfer[];
+  nextCursor: LatestCursor;
+}> {
+  const limitPerPage = 200;
+  const maxPages = 8;     // safety: up to 1600 rows
+  const maxItems = 2000;  // safety: hard cap
+
+  let all: Transfer[] = [];
+  let cursor: LatestCursor = null;
+
+  const now = Date.now();
+  const cutoff = now - 24 * 60 * 60 * 1000;
+
+  for (let page = 0; page < maxPages; page++) {
+    const url = new URL(`${API_BASE}/transfers/latest`);
+    url.searchParams.set("limit", String(limitPerPage));
+    if (cursor) {
+      url.searchParams.set("cursorBlock", String(cursor.blockNumber));
+      url.searchParams.set("cursorLog", String(cursor.logIndex));
+    }
+
+    const res = await fetch(url.toString());
+    if (!res.ok) break;
+
+    const data = (await res.json()) as LatestTransfersResponse;
+    const pageTransfers = (data.items || []).map((t) => normalizeTransfer(t));
+
+    all = all.concat(pageTransfers);
+    cursor = data.nextCursor ?? null;
+
+    if (pageTransfers.length === 0 || !cursor) break;
+    if (all.length >= maxItems) break;
+
+    const oldest = all[all.length - 1];
+    const oldestTime = parseISO(oldest.block_time)?.getTime() ?? null;
+    if (oldestTime !== null && oldestTime < cutoff) break;
+  }
+
+  return { transfers: all, nextCursor: cursor };
 }
 
 export default function DailyAuditPage() {
@@ -173,11 +243,10 @@ export default function DailyAuditPage() {
   async function load() {
     setLoading(true);
     try {
-      const [healthRes, summaryRes, holdersRes, transfersRes] = await Promise.all([
+      const [healthRes, summaryRes, holdersRes] = await Promise.all([
         fetch(`${API_BASE}/health`),
         fetch(`${API_BASE}/summary`),
         fetch(`${API_BASE}/top-holders?limit=50`),
-        fetch(`${API_BASE}/transfers?limit=2000`),
       ]);
 
       setSystemOnline(healthRes.ok);
@@ -195,16 +264,9 @@ export default function DailyAuditPage() {
         setHolders([]);
       }
 
-      if (transfersRes.ok) {
-        const data = await transfersRes.json();
-        let raw: any[] = [];
-        if (Array.isArray(data)) raw = data;
-        else if (Array.isArray(data.transfers)) raw = data.transfers;
-        else if (Array.isArray(data.items)) raw = data.items;
-        setTransfers(raw.map((t) => normalizeTransfer(t)));
-      } else {
-        setTransfers([]);
-      }
+      // ✅ Latest transfers (cursor, index-backed)
+      const latest = await fetchLatestTransfersCovering24h();
+      setTransfers(latest.transfers);
 
       setLastUpdatedISO(new Date().toISOString());
     } catch (e) {
@@ -330,7 +392,6 @@ export default function DailyAuditPage() {
 
   const indexedBlock = summary?.lastIndexedBlock ?? null;
 
-  // ====== Cards data (this is what gives you the “last two pics” look) ======
   const statusCards: StatCardData[] = [
     {
       id: "report-status",
@@ -372,44 +433,43 @@ export default function DailyAuditPage() {
       <div className="app-shell">
         <Header />
 
-{/* Status */}
-<section className="panel panel--status">
-  {/* ✅ Left: your box stays EXACTLY the same (structure unchanged) */}
-  <div className="panel-block">
-    <div className="panel-header-row">
-      <h2 className="panel-title">Daily BC400 Audit Report</h2>
-    </div>
+        {/* Status */}
+        <section className="panel panel--status">
+          <div className="panel-block">
+            <div className="panel-header-row">
+              <h2 className="panel-title">Daily BC400 Audit Report</h2>
+            </div>
 
-    <p className="panel-muted">
-      Live recap derived from your existing API: <b>/health</b>, <b>/summary</b>,{" "}
-      <b>/top-holders</b>, <b>/transfers</b>
-    </p>
+            <p className="panel-muted">
+              Live recap derived from your existing API: <b>/health</b>, <b>/summary</b>,{" "}
+              <b>/top-holders</b>, <b>/transfers/latest</b>
+            </p>
 
-    <div style={{ marginTop: 12 }}>
-      <StatsGrid stats={statusCards} />
-    </div>
-  </div>
+            <div style={{ marginTop: 12 }}>
+              <StatsGrid stats={statusCards} />
+            </div>
+          </div>
 
-  {/* ✅ Right: buttons OUTSIDE the box */}
-  <div className="daily-audit-actions">
-    <button
-      type="button"
-      className="pill-action-btn"
-      onClick={() => window.history.back()}
-    >
-      ← Back to dashboard
-    </button>
+          {/* ✅ Right: ONLY these buttons now */}
+          <div className="daily-audit-actions">
+            <button
+              type="button"
+              className="pill-action-btn"
+              onClick={() => window.history.back()}
+            >
+              ← Back to dashboard
+            </button>
 
-    <button
-      type="button"
-      className="pill-action-btn"
-      onClick={load}
-      disabled={loading}
-    >
-      {loading ? "Refreshing..." : "↻ Refresh"}
-    </button>
-  </div>
-</section>
+            <button
+              type="button"
+              className="pill-action-btn"
+              onClick={load}
+              disabled={loading}
+            >
+              {loading ? "Refreshing..." : "↻ Refresh"}
+            </button>
+          </div>
+        </section>
 
         {/* Confidence / Signals */}
         <section className="panel panel--table">
@@ -472,7 +532,7 @@ export default function DailyAuditPage() {
           </div>
 
           <div className="panel-muted" style={{ marginTop: 10 }}>
-            This page is live right now because it uses only your existing endpoints — no new backend route required.
+            Now using <b>/transfers/latest</b> (cursor pagination) instead of pulling 2000 rows from <b>/transfers</b>.
           </div>
         </section>
       </div>
