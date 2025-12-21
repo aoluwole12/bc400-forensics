@@ -556,3 +556,92 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* =========================
+   Daily Audit Roadmap (pic 2 layout)
+   ========================= */
+
+.daily-roadmap {
+  margin-top: 12px;
+  padding: 14px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.daily-roadmap__title {
+  margin: 0 0 10px;
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #5b4b18;
+}
+
+.daily-roadmap__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.daily-roadmap__row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.18);
+}
+
+.daily-roadmap__left {
+  flex: 1;
+  min-width: 0;
+}
+
+.daily-roadmap__rowTitle {
+  font-weight: 900;
+  color: #111111;
+  margin-bottom: 6px;
+}
+
+.daily-roadmap__line {
+  color: #5e501e;
+  font-size: 12px;
+  line-height: 1.35;
+  margin: 2px 0;
+}
+
+.daily-roadmap__right {
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.daily-roadmap__chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 72px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  background: rgba(0, 0, 0, 0.78);
+  color: #ffd936;
+}
+
+.daily-roadmap__chip--live {
+  border-color: rgba(76, 212, 135, 0.9);
+}
+
+.daily-roadmap__chip--next {
+  border-color: rgba(255, 217, 54, 0.7);
+}
+
+.daily-roadmap__chip--planned {
+  border-color: rgba(255, 255, 255, 0.35);
+}
