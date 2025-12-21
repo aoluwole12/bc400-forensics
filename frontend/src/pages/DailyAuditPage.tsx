@@ -483,7 +483,11 @@ export default function DailyAuditPage() {
           </div>
 
           <div style={{ marginTop: 14 }}>
-            <DailyAuditRoadmap />
+           <DailyAuditRoadmap
+  systemOnline={systemOnline}
+  indexedBlock={indexedBlock}
+  transfers24hCount={last24hTransfers.length}
+/>
           </div>
         </section>
 
