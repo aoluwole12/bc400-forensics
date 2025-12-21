@@ -2,10 +2,11 @@ import type { Express, Request, Response } from "express";
 import { Contract, JsonRpcProvider, getAddress } from "ethers";
 
 /**
- * Fixes:
- * - Do NOT checksum at module load time
- * - Validate raw env strings before getAddress (ethers v6 throws on invalid)
- * - Return a safe JSON response (not a crashing throw) when env is bad
+ * Corrections added:
+ * - safeChecksum always returns { ok:true, value } OR { ok:false, label, raw, error }
+ * - decimals() fallback must be a number (uint8), not 18n
+ * - validate pairRaw with isHexAddress BEFORE comparing to ZERO (case-insensitive)
+ * - keep all checksummed comparisons consistent
  */
 
 const DEFAULT_BC400 = "0x61Fc93c7C070B32B1b1479B86056d8Ec1D7125BD";
@@ -25,7 +26,7 @@ function safeChecksum(label: string, raw: string) {
     return { ok: false as const, label, raw: v, error: `invalid ${label} address` };
   }
   try {
-    return { ok: true as const, value: getAddress(v) };
+    return { ok: true as const, label, raw: v, value: getAddress(v) };
   } catch (e) {
     return {
       ok: false as const,
@@ -66,10 +67,8 @@ function handleError(res: Response, where: string, err: unknown) {
 
 async function lpLockHandler(_req: Request, res: Response) {
   try {
-    // ✅ Read env at request time (so restarts / env updates behave correctly)
     const RAW_BC400 = process.env.BC400_TOKEN_ADDRESS || DEFAULT_BC400;
 
-    // ✅ Validate before checksum to avoid "invalid address" crashes
     const bc400 = safeChecksum("BC400_TOKEN_ADDRESS", RAW_BC400);
     const wbnb = safeChecksum("WBNB", RAW_WBNB);
     const factoryAddr = safeChecksum("PANCAKESWAP_FACTORY", RAW_FACTORY);
@@ -96,8 +95,20 @@ async function lpLockHandler(_req: Request, res: Response) {
     const factory = new Contract(FACTORY, FACTORY_ABI, provider);
 
     const pairRaw: string = await factory.getPair(BC400, WBNB);
+    const pairTrim = String(pairRaw || "").trim();
 
-    if (!pairRaw || pairRaw === ZERO_ADDR) {
+    // Validate pair string first (factory can return 0x000...0)
+    if (!isHexAddress(pairTrim)) {
+      return res.status(200).json({
+        ok: false,
+        pairFound: false,
+        reason: `Factory returned invalid pair address: "${pairTrim}"`,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    // Compare against ZERO safely (case-insensitive)
+    if (pairTrim.toLowerCase() === ZERO.toLowerCase()) {
       return res.json({
         ok: true,
         pairFound: false,
@@ -106,31 +117,24 @@ async function lpLockHandler(_req: Request, res: Response) {
       });
     }
 
-    // ✅ validate pair returned from factory
-    if (!isHexAddress(pairRaw)) {
-      return res.status(200).json({
-        ok: false,
-        pairFound: false,
-        reason: `Factory returned invalid pair address: "${String(pairRaw)}"`,
-        updatedAt: new Date().toISOString(),
-      });
-    }
-
-    const pair = getAddress(pairRaw);
+    const pair = getAddress(pairTrim);
     const lp = new Contract(pair, ERC20_ABI, provider);
 
     const [symbol, decimalsRaw, totalSupply, deadBal, zeroBal] = await Promise.all([
       lp.symbol().catch(() => "LP"),
-      lp.decimals().catch(() => 18n),
+      // ✅ uint8 -> number fallback, not bigint
+      lp.decimals().catch(() => 18),
       lp.totalSupply(),
       lp.balanceOf(DEAD_ADDR),
       lp.balanceOf(ZERO_ADDR),
     ]);
 
     const decimals = Number(decimalsRaw);
-    const burned = deadBal + zeroBal;
+    const burned = (deadBal as bigint) + (zeroBal as bigint);
     const burnedPct =
-      totalSupply > 0n ? Number((burned * 1000000n) / totalSupply) / 10000 : 0;
+      (totalSupply as bigint) > 0n
+        ? Number(((burned * 1_000_000n) / (totalSupply as bigint))) / 10_000
+        : 0;
 
     return res.json({
       ok: true,
@@ -139,7 +143,7 @@ async function lpLockHandler(_req: Request, res: Response) {
       pairAddress: pair,
       lp: { symbol, decimals },
       burn: {
-        totalSupplyRaw: totalSupply.toString(),
+        totalSupplyRaw: (totalSupply as bigint).toString(),
         burnedRaw: burned.toString(),
         burnedPct,
       },
