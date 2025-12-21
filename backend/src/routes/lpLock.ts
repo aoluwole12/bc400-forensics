@@ -2,20 +2,39 @@ import type { Express, Request, Response } from "express";
 import { Contract, JsonRpcProvider, getAddress } from "ethers";
 
 /**
- * IMPORTANT:
+ * Fixes:
  * - Do NOT checksum at module load time
- * - ethers v6 throws immediately on invalid checksum
+ * - Validate raw env strings before getAddress (ethers v6 throws on invalid)
+ * - Return a safe JSON response (not a crashing throw) when env is bad
  */
 
-const RAW_BC400 =
-  process.env.BC400_TOKEN_ADDRESS ||
-  "0x61Fc93c7C070B32B1b1479B86056d8Ec1D7125BD";
-
+const DEFAULT_BC400 = "0x61Fc93c7C070B32B1b1479B86056d8Ec1D7125BD";
 const RAW_WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
 const RAW_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73";
 
 const DEAD = "0x000000000000000000000000000000000000dEaD";
 const ZERO = "0x0000000000000000000000000000000000000000";
+
+function isHexAddress(s: string) {
+  return /^0x[a-fA-F0-9]{40}$/.test(String(s || "").trim());
+}
+
+function safeChecksum(label: string, raw: string) {
+  const v = String(raw || "").trim();
+  if (!isHexAddress(v)) {
+    return { ok: false as const, label, raw: v, error: `invalid ${label} address` };
+  }
+  try {
+    return { ok: true as const, value: getAddress(v) };
+  } catch (e) {
+    return {
+      ok: false as const,
+      label,
+      raw: v,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
 
 function getProvider() {
   const rpc =
@@ -47,12 +66,31 @@ function handleError(res: Response, where: string, err: unknown) {
 
 async function lpLockHandler(_req: Request, res: Response) {
   try {
-    // ✅ checksum ONLY inside handler
-    const BC400 = getAddress(RAW_BC400);
-    const WBNB = getAddress(RAW_WBNB);
-    const FACTORY = getAddress(RAW_FACTORY);
-    const DEAD_ADDR = getAddress(DEAD);
-    const ZERO_ADDR = getAddress(ZERO);
+    // ✅ Read env at request time (so restarts / env updates behave correctly)
+    const RAW_BC400 = process.env.BC400_TOKEN_ADDRESS || DEFAULT_BC400;
+
+    // ✅ Validate before checksum to avoid "invalid address" crashes
+    const bc400 = safeChecksum("BC400_TOKEN_ADDRESS", RAW_BC400);
+    const wbnb = safeChecksum("WBNB", RAW_WBNB);
+    const factoryAddr = safeChecksum("PANCAKESWAP_FACTORY", RAW_FACTORY);
+    const deadAddr = safeChecksum("DEAD", DEAD);
+    const zeroAddr = safeChecksum("ZERO", ZERO);
+
+    const bad = [bc400, wbnb, factoryAddr, deadAddr, zeroAddr].find((x) => !x.ok);
+    if (bad && !bad.ok) {
+      return res.status(200).json({
+        ok: false,
+        pairFound: false,
+        reason: `${bad.error}: "${bad.raw}"`,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const BC400 = bc400.value;
+    const WBNB = wbnb.value;
+    const FACTORY = factoryAddr.value;
+    const DEAD_ADDR = deadAddr.value;
+    const ZERO_ADDR = zeroAddr.value;
 
     const provider = getProvider();
     const factory = new Contract(FACTORY, FACTORY_ABI, provider);
@@ -68,17 +106,26 @@ async function lpLockHandler(_req: Request, res: Response) {
       });
     }
 
+    // ✅ validate pair returned from factory
+    if (!isHexAddress(pairRaw)) {
+      return res.status(200).json({
+        ok: false,
+        pairFound: false,
+        reason: `Factory returned invalid pair address: "${String(pairRaw)}"`,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
     const pair = getAddress(pairRaw);
     const lp = new Contract(pair, ERC20_ABI, provider);
 
-    const [symbol, decimalsRaw, totalSupply, deadBal, zeroBal] =
-      await Promise.all([
-        lp.symbol().catch(() => "LP"),
-        lp.decimals().catch(() => 18n),
-        lp.totalSupply(),
-        lp.balanceOf(DEAD_ADDR),
-        lp.balanceOf(ZERO_ADDR),
-      ]);
+    const [symbol, decimalsRaw, totalSupply, deadBal, zeroBal] = await Promise.all([
+      lp.symbol().catch(() => "LP"),
+      lp.decimals().catch(() => 18n),
+      lp.totalSupply(),
+      lp.balanceOf(DEAD_ADDR),
+      lp.balanceOf(ZERO_ADDR),
+    ]);
 
     const decimals = Number(decimalsRaw);
     const burned = deadBal + zeroBal;

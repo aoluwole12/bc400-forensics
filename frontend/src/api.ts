@@ -6,6 +6,22 @@ export type Summary = {
   lastIndexedBlock: number | null;
   totalTransfers: number;
   totalWallets: number;
+
+  // ✅ Pair context
+  pairAddress?: string;
+  pairAddressId?: number | null;
+
+  // ✅ All-time totals (raw + formatted)
+  totalBoughtBc400Raw?: string;
+  totalSoldBc400Raw?: string;
+  totalBoughtBc400?: string; // formatted units string
+  totalSoldBc400?: string;   // formatted units string
+
+  // ✅ Counts (support both naming styles)
+  totalBuyTransfers?: number;
+  totalSellTransfers?: number;
+  buyTransfers?: number;
+  sellTransfers?: number;
 };
 
 export type Holder = {
@@ -52,6 +68,16 @@ export type DexPriceResponse = {
   note?: string | null;
 };
 
+export type DexTotalsResponse = {
+  pairAddress: string;
+  pairAddressId: number | null;
+  totalBuys: number;
+  totalSells: number;
+  totalBoughtRaw: string;
+  totalSoldRaw: string;
+  note?: string;
+};
+
 export type LpLockResponse = {
   ok: boolean;
   pairFound: boolean;
@@ -90,7 +116,8 @@ export type SecurityRulesResponse = {
 // Existing fetchers
 // ----------------------
 export async function fetchSummary(): Promise<Summary> {
-  const res = await fetch(`${API_BASE}/summary`);
+  // ✅ Prefer /api/summary since backend exposes both (/summary + /api/summary)
+  const res = await fetch(`${API_BASE}/api/summary`);
   if (!res.ok) throw new Error(`Failed to load summary: ${res.status}`);
   return res.json();
 }
@@ -117,8 +144,13 @@ export async function fetchDexPrice(token?: string): Promise<DexPriceResponse> {
   return res.json();
 }
 
+export async function fetchDexTotals(): Promise<DexTotalsResponse> {
+  const res = await fetch(`${API_BASE}/api/dex/totals`);
+  if (!res.ok) throw new Error(`Failed to load dex totals: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchLpLock(holder?: string): Promise<LpLockResponse> {
-  // Optional: allow testing a holder address via ?holder=0x...
   const qs = holder ? `?holder=${encodeURIComponent(holder)}` : "";
   const res = await fetch(`${API_BASE}/lp/lock${qs}`);
   if (!res.ok) throw new Error(`Failed to load lp lock: ${res.status}`);

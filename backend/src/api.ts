@@ -1,4 +1,6 @@
-import "dotenv/config";
+//import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: "src/.env" });
 import express from "express";
 import cors from "cors";
 import type { Request, Response } from "express";
@@ -8,6 +10,9 @@ import { registerDexPriceRoute } from "./routes/dexPrice";
 import { registerLpLockRoute } from "./routes/lpLock";
 import { registerSecurityRulesRoute } from "./routes/securityRules";
 import { registerLatestTransfersRoute } from "./routes/transfersLatest";
+import { registerDexTotalsRoute } from "./routes/dexTotals";
+import { registerSummaryRoute } from "./routes/summary";
+import { registerDebugAddressesRoute } from "./routes/debugAddresses";
 
 const PORT = Number(process.env.PORT || 4000);
 
@@ -283,6 +288,9 @@ app.post("/sql", async (req: Request, res: Response) => {
 registerDexPriceRoute(app);
 registerLpLockRoute(app);
 registerSecurityRulesRoute(app, pool);
+registerDexTotalsRoute(app, pool);
+registerSummaryRoute(app, pool);
+registerDebugAddressesRoute(app);
 
 // ✅ Latest transfers (cursor pagination)
 registerLatestTransfersRoute(app, pool);

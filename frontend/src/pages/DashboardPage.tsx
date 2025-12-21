@@ -3,17 +3,23 @@ import "../index.css";
 import { Header } from "../components/Header";
 
 type Summary = {
-  firstBlock: number;
-  lastIndexedBlock: number;
+  firstBlock: number | null;
+  lastIndexedBlock: number | null;
   totalTransfers: number;
   totalWallets: number;
+
+  // ✅ new (optional)
+  totalBoughtBc400Raw?: string;
+  totalSoldBc400Raw?: string;
+  totalBuyTransfers?: number;
+  totalSellTransfers?: number;
 };
 
 type Holder = {
   rank: number;
   address: string;
-  balance_bc400: string;          // fallback human (sometimes present)
-  balance_raw?: string | null;    // preferred raw (18dp) if present
+  balance_bc400: string;
+  balance_raw?: string | null;
   tx_count: number;
   first_seen: string | null;
   last_seen: string | null;
@@ -24,14 +30,25 @@ type Transfer = {
   block_time: string | null;
   from_address: string;
   to_address: string;
-  amount_bc400: string | null;     // fallback human (sometimes present)
-  amount_raw?: string | null;      // preferred raw (18dp) if present
+  amount_bc400: string | null;
+  amount_raw?: string | null;
+};
+
+type DexTotals = {
+  pairAddress: string;
+  pairAddressId: number | null;
+  totalBuys: number;
+  totalSells: number;
+  totalBoughtRaw: string;
+  totalSoldRaw: string;
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
-
 const BC400_DECIMALS = 18;
 
+// --------------------
+// Formatting helpers
+// --------------------
 function toBigIntSafe(input: string): bigint {
   const s = String(input ?? "").trim().replace(/,/g, "");
   if (s === "" || s === "-") return 0n;
@@ -102,7 +119,9 @@ function formatHumanDecimal(input: string, maxFrac = 6, minFrac = 0): string {
     frac = frac.replace(/0+$/, "");
     while (frac.length < minFrac) frac += "0";
 
-    return frac.length ? `${neg ? "-" : ""}${whole}.${frac}` : `${neg ? "-" : ""}${whole}`;
+    return frac.length
+      ? `${neg ? "-" : ""}${whole}.${frac}`
+      : `${neg ? "-" : ""}${whole}`;
   }
 
   return input;
@@ -120,7 +139,10 @@ function formatToken(value: string | number | null | undefined): string {
   return formatHumanDecimal(s, 6, 2);
 }
 
-function formatTokenPreferRaw(raw: string | null | undefined, human: string | null | undefined): string {
+function formatTokenPreferRaw(
+  raw: string | null | undefined,
+  human: string | null | undefined
+): string {
   const pick = raw && String(raw).trim() !== "" ? raw : human;
   return formatToken(pick);
 }
@@ -139,6 +161,9 @@ function formatDateTime(iso: string | null): string {
   });
 }
 
+// --------------------
+// Normalizers
+// --------------------
 function normalizeHolder(raw: any, index: number): Holder {
   return {
     rank: raw.rank ?? raw.position ?? raw.index ?? index + 1,
@@ -162,8 +187,12 @@ function normalizeTransfer(raw: any): Transfer {
   };
 }
 
+// --------------------
+// Component
+// --------------------
 export default function DashboardPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [dexTotals, setDexTotals] = useState<DexTotals | null>(null); // ✅ FIXED: inside component
   const [holders, setHolders] = useState<Holder[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [systemOnline, setSystemOnline] = useState<boolean>(false);
@@ -172,23 +201,36 @@ export default function DashboardPage() {
   const [transferFetchLimit, setTransferFetchLimit] = useState<number>(50);
   const [loadingMoreTransfers, setLoadingMoreTransfers] = useState<boolean>(false);
 
-  // ✅ ref for scrolling Recent Transfers table back to top
   const recentTransfersScrollRef = useRef<HTMLDivElement | null>(null);
 
   async function loadDashboard(fetchLimitOverride?: number) {
     const fetchLimit = fetchLimitOverride ?? transferFetchLimit;
 
     try {
-      const [healthRes, summaryRes, holdersRes, transfersRes] = await Promise.all([
-        fetch(`${API_BASE}/health`),
-        fetch(`${API_BASE}/summary`),
-        fetch(`${API_BASE}/top-holders`),
-        fetch(`${API_BASE}/transfers?limit=${fetchLimit}`),
-      ]);
+      const [healthRes, summaryRes, holdersRes, transfersRes, dexTotalsRes] =
+        await Promise.all([
+          fetch(`${API_BASE}/health`),
+          fetch(`${API_BASE}/summary`),
+          fetch(`${API_BASE}/top-holders`),
+          fetch(`${API_BASE}/transfers?limit=${fetchLimit}`),
+          fetch(`${API_BASE}/api/dex/totals`),
+        ]);
 
       setSystemOnline(healthRes.ok);
 
-      if (summaryRes.ok) setSummary(await summaryRes.json());
+      if (summaryRes.ok) {
+        const s = await summaryRes.json();
+        setSummary(s);
+      } else {
+        setSummary(null);
+      }
+
+      if (dexTotalsRes.ok) {
+        const d = await dexTotalsRes.json();
+        setDexTotals(d);
+      } else {
+        setDexTotals(null);
+      }
 
       if (holdersRes.ok) {
         const data = await holdersRes.json();
@@ -239,19 +281,43 @@ export default function DashboardPage() {
     setTransferShowCount(nextShow);
   }
 
-  // ✅ NEW: move view back to the beginning (most recent rows) + scroll to top
   function handleBackToMostRecent() {
-    setTransferShowCount(20); // reset view to most recent page
+    setTransferShowCount(20);
     if (recentTransfersScrollRef.current) {
       recentTransfersScrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
     } else {
-      // fallback if ref fails
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   }
 
   const top20 = holders.slice(0, 20);
   const visibleTransfers = transfers.slice(0, Math.min(transferShowCount, transfers.length));
+
+  // ✅ Prefer /summary totals, fallback to /dex/totals
+  const boughtRaw =
+    (summary?.totalBoughtBc400Raw && summary.totalBoughtBc400Raw !== "0"
+      ? summary.totalBoughtBc400Raw
+      : dexTotals?.totalBoughtRaw) ?? "0";
+
+  const soldRaw =
+    (summary?.totalSoldBc400Raw && summary.totalSoldBc400Raw !== "0"
+      ? summary.totalSoldBc400Raw
+      : dexTotals?.totalSoldRaw) ?? "0";
+
+  const buyTransfers =
+    (summary?.totalBuyTransfers && summary.totalBuyTransfers !== 0
+      ? summary.totalBuyTransfers
+      : dexTotals?.totalBuys) ?? 0;
+
+  const sellTransfers =
+    (summary?.totalSellTransfers && summary.totalSellTransfers !== 0
+      ? summary.totalSellTransfers
+      : dexTotals?.totalSells) ?? 0;
+
+  const totalBought = formatToken(boughtRaw);
+  const totalSold = formatToken(soldRaw);
+  const buyCount = formatNumber(buyTransfers);
+  const sellCount = formatNumber(sellTransfers);
 
   return (
     <div className="app-root">
@@ -261,6 +327,7 @@ export default function DashboardPage() {
         <section className="panel panel--status">
           <div className="panel-block">
             <h2 className="panel-title panel-title--index">Index Status</h2>
+
             {summary ? (
               <dl className="stats-grid">
                 <div>
@@ -278,6 +345,24 @@ export default function DashboardPage() {
                 <div>
                   <dt>Total Wallets</dt>
                   <dd>{formatNumber(summary.totalWallets)}</dd>
+                </div>
+
+                <div>
+                  <dt>Total Bought (BC400)</dt>
+                  <dd>{totalBought}</dd>
+                </div>
+                <div>
+                  <dt>Total Sold (BC400)</dt>
+                  <dd>{totalSold}</dd>
+                </div>
+
+                <div>
+                  <dt>Buy Transfers</dt>
+                  <dd>{buyCount}</dd>
+                </div>
+                <div>
+                  <dt>Sell Transfers</dt>
+                  <dd>{sellCount}</dd>
                 </div>
               </dl>
             ) : (
@@ -350,11 +435,7 @@ export default function DashboardPage() {
               Showing {visibleTransfers.length} of {transfers.length} loaded
             </span>
 
-            <div
-              className="panel-header-actions"
-              style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}
-            >
-              {/* ✅ NEW button: jump back to most recent + scroll to top */}
+            <div className="panel-header-actions" style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
               <button
                 type="button"
                 className="pill-action-btn"
@@ -380,10 +461,7 @@ export default function DashboardPage() {
           {visibleTransfers.length === 0 ? (
             <p className="panel-muted">No transfers found.</p>
           ) : (
-            <div
-              className="table-scroll table-scroll--recent"
-              ref={recentTransfersScrollRef}
-            >
+            <div className="table-scroll table-scroll--recent" ref={recentTransfersScrollRef}>
               <table className="data-table data-table--transfers">
                 <thead>
                   <tr>

@@ -1,17 +1,16 @@
 import type { Express } from "express";
 import type { Pool } from "pg";
-import { formatUnits } from "ethers";
 
 function normAddr(a: string) {
   return (a || "").trim().toLowerCase();
 }
 
 export function registerSummaryRoute(app: Express, pool: Pool) {
-  async function handler(_req: any, res: any) {
+  app.get("/summary", async (_req, res) => {
     try {
       const pairAddress = normAddr(process.env.BC400_PAIR_ADDRESS || "");
-      const decimals = Number(process.env.BC400_DECIMALS || "18");
 
+      // Existing summary pieces (adjust column names if yours differ)
       const base = await pool.query<{
         first_block: number | null;
         last_indexed_block: number | null;
@@ -25,17 +24,14 @@ export function registerSummaryRoute(app: Express, pool: Pool) {
           (SELECT COUNT(*)::int FROM public.addresses) AS total_wallets
       `);
 
-      // Defaults
       let totalBoughtBc400Raw = "0";
       let totalSoldBc400Raw = "0";
       let totalBuyTransfers = 0;
       let totalSellTransfers = 0;
-      let pairAddressId: number | null = null;
 
-      // If pair address is set, compute aggregates
-      if (pairAddress && pairAddress.startsWith("0x") && pairAddress.length === 42) {
+      // If we have the pair address, compute BUY/SELL aggregates "to date"
+      if (pairAddress) {
         const agg = await pool.query<{
-          pair_id: number | null;
           bought_raw: string;
           sold_raw: string;
           buy_count: number;
@@ -48,61 +44,36 @@ export function registerSummaryRoute(app: Express, pool: Pool) {
             LIMIT 1
           )
           SELECT
-            (SELECT id FROM pair) AS pair_id,
-
             COALESCE(SUM(CASE WHEN t.from_address_id = (SELECT id FROM pair) THEN t.raw_amount::numeric ELSE 0 END), 0)::text AS bought_raw,
             COALESCE(SUM(CASE WHEN t.to_address_id   = (SELECT id FROM pair) THEN t.raw_amount::numeric ELSE 0 END), 0)::text AS sold_raw,
-
             COALESCE(SUM(CASE WHEN t.from_address_id = (SELECT id FROM pair) THEN 1 ELSE 0 END), 0)::int AS buy_count,
             COALESCE(SUM(CASE WHEN t.to_address_id   = (SELECT id FROM pair) THEN 1 ELSE 0 END), 0)::int AS sell_count
           FROM public.transfers t
-          WHERE (SELECT id FROM pair) IS NOT NULL;
+          WHERE (SELECT id FROM pair) IS NOT NULL
         `, [pairAddress]);
 
-        pairAddressId = agg.rows[0]?.pair_id ?? null;
         totalBoughtBc400Raw = agg.rows[0]?.bought_raw ?? "0";
         totalSoldBc400Raw = agg.rows[0]?.sold_raw ?? "0";
         totalBuyTransfers = agg.rows[0]?.buy_count ?? 0;
         totalSellTransfers = agg.rows[0]?.sell_count ?? 0;
       }
 
-      // Helpful “human” numbers (frontend can still use raw if it wants)
-      const totalBoughtBc400 = formatUnits(BigInt(totalBoughtBc400Raw || "0"), decimals);
-      const totalSoldBc400 = formatUnits(BigInt(totalSoldBc400Raw || "0"), decimals);
-
       const row = base.rows[0];
-
-      // ✅ Return BOTH naming styles so the UI can't miss it
       res.json({
         firstBlock: row?.first_block ?? null,
         lastIndexedBlock: row?.last_indexed_block ?? null,
         totalTransfers: row?.total_transfers ?? 0,
         totalWallets: row?.total_wallets ?? 0,
 
-        pairAddress,
-        pairAddressId,
-
-        // raw + formatted
+        // ✅ New fields
         totalBoughtBc400Raw,
         totalSoldBc400Raw,
-        totalBoughtBc400, // formatted units string
-        totalSoldBc400,   // formatted units string
-
-        // counts (both key styles)
         totalBuyTransfers,
         totalSellTransfers,
-        buyTransfers: totalBuyTransfers,
-        sellTransfers: totalSellTransfers,
       });
     } catch (err: any) {
       console.error("Error in /summary:", err);
-      res.status(500).json({
-        error: "Failed to load summary",
-        details: String(err?.message || err),
-      });
+      res.status(500).json({ error: "Failed to load summary", details: String(err?.message || err) });
     }
-  }
-
-  app.get("/summary", handler);
-  app.get("/api/summary", handler); // ✅ critical
+  });
 }
