@@ -5,7 +5,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+
+    "check:pages": "bash scripts/check-pages.sh",
+    "check:routes": "bash scripts/check-routes.sh",
+    "check:ui": "npm run check:pages && npm run check:routes"
   },
   "dependencies": {
     "axios": "^1.7.7",

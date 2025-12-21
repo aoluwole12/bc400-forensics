@@ -3,6 +3,7 @@ import "../index.css";
 import { Header } from "../components/Header";
 import { DailyAuditRoadmap } from "../components/DailyAuditRoadmap";
 import StatsGrid, { StatCardData } from "../components/StatsGrid";
+import DailyAuditLayout from "../components/daily-audit/DailyAuditLayout";
 
 // We will reuse the same formatting approach you already have (BigInt-safe, 18dp)
 const BC400_DECIMALS = 18;
@@ -76,9 +77,7 @@ function formatHumanDecimal(input: string, maxFrac = 6, minFrac = 0): string {
     frac = frac.replace(/0+$/, "");
     while (frac.length < minFrac) frac += "0";
 
-    return frac.length
-      ? `${neg ? "-" : ""}${whole}.${frac}`
-      : `${neg ? "-" : ""}${whole}`;
+    return frac.length ? `${neg ? "-" : ""}${whole}.${frac}` : `${neg ? "-" : ""}${whole}`;
   }
 
   return input;
@@ -87,14 +86,6 @@ function formatHumanDecimal(input: string, maxFrac = 6, minFrac = 0): string {
 function formatNumber(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return "-";
   return formatHumanDecimal(String(value), 6, 0);
-}
-
-function formatToken(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) return "-";
-  const s = String(value).trim();
-
-  if (looksRaw18(s)) return formatFromRaw18(s, 6, 2);
-  return formatHumanDecimal(s, 6, 2);
 }
 
 function formatDateTime(iso: string | null): string {
@@ -134,8 +125,6 @@ type Transfer = {
   to_address: string;
   amount_bc400: string | null; // fallback human
   amount_raw?: string | null; // preferred raw
-
-  // extra fields (useful later)
   tx_hash?: string | null;
   log_index?: number | null;
 };
@@ -170,10 +159,8 @@ function normalizeTransfer(raw: any): Transfer {
     block_time: raw.block_time ?? raw.blockTime ?? raw.time ?? null,
     from_address: raw.from_address ?? raw.fromAddress ?? raw.from ?? "",
     to_address: raw.to_address ?? raw.toAddress ?? raw.to ?? "",
-    amount_bc400:
-      raw.amount_bc400 ?? raw.amountBC400 ?? raw.amount ?? raw.value ?? null,
-    amount_raw:
-      raw.raw_amount ?? raw.rawAmount ?? raw.amount_raw ?? raw.rawAmount18 ?? null,
+    amount_bc400: raw.amount_bc400 ?? raw.amountBC400 ?? raw.amount ?? raw.value ?? null,
+    amount_raw: raw.raw_amount ?? raw.rawAmount ?? raw.amount_raw ?? raw.rawAmount18 ?? null,
     tx_hash: raw.tx_hash ?? raw.txHash ?? null,
     log_index: raw.log_index ?? raw.logIndex ?? null,
   };
@@ -185,18 +172,13 @@ function parseISO(iso: string | null) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/**
- * Pulls transfers using /transfers/latest cursor pagination until:
- * - we cover at least last 24h (based on oldest row time), OR
- * - we hit maxPages / maxItems safety caps
- */
 async function fetchLatestTransfersCovering24h(): Promise<{
   transfers: Transfer[];
   nextCursor: LatestCursor;
 }> {
   const limitPerPage = 200;
-  const maxPages = 8;     // safety: up to 1600 rows
-  const maxItems = 2000;  // safety: hard cap
+  const maxPages = 8; // safety: up to 1600 rows
+  const maxItems = 2000; // safety: hard cap
 
   let all: Transfer[] = [];
   let cursor: LatestCursor = null;
@@ -264,7 +246,6 @@ export default function DailyAuditPage() {
         setHolders([]);
       }
 
-      // ✅ Latest transfers (cursor, index-backed)
       const latest = await fetchLatestTransfersCovering24h();
       setTransfers(latest.transfers);
 
@@ -295,10 +276,7 @@ export default function DailyAuditPage() {
       return d.getTime() >= cutoff && d.getTime() <= now;
     });
 
-    return {
-      last24hTransfers: within,
-      windowLabel: "Last 24H",
-    };
+    return { last24hTransfers: within, windowLabel: "Last 24H" };
   }, [transfers]);
 
   const metrics = useMemo(() => {
@@ -310,17 +288,14 @@ export default function DailyAuditPage() {
 
     let sumRaw = 0n;
     let rawCount = 0;
-
     for (const t of last24hTransfers) {
-      const raw =
-        t.amount_raw && String(t.amount_raw).trim() !== "" ? String(t.amount_raw) : null;
+      const raw = t.amount_raw && String(t.amount_raw).trim() !== "" ? String(t.amount_raw) : null;
       if (raw && /^-?\d+$/.test(raw.replace(/,/g, ""))) {
         sumRaw += toBigIntSafe(raw);
         rawCount++;
       }
     }
-
-    const volumeDisplay = rawCount > 0 ? formatFromRaw18(sumRaw.toString(), 6, 2) : "-";
+    const transferVolume = rawCount > 0 ? formatFromRaw18(sumRaw.toString(), 6, 2) : "-";
 
     const top20 = holders.slice(0, 20);
     const top10 = holders.slice(0, 10);
@@ -330,23 +305,15 @@ export default function DailyAuditPage() {
     let okRaw = true;
 
     for (const h of top10) {
-      const raw =
-        h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
-      if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) {
-        okRaw = false;
-        break;
-      }
+      const raw = h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
+      if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) { okRaw = false; break; }
       top10Sum += toBigIntSafe(raw);
     }
 
     if (okRaw) {
       for (const h of top20) {
-        const raw =
-          h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
-        if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) {
-          okRaw = false;
-          break;
-        }
+        const raw = h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
+        if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) { okRaw = false; break; }
         top20Sum += toBigIntSafe(raw);
       }
     }
@@ -364,12 +331,8 @@ export default function DailyAuditPage() {
     let whaleRawOk = true;
 
     for (const t of last24hTransfers) {
-      const raw =
-        t.amount_raw && String(t.amount_raw).trim() !== "" ? String(t.amount_raw) : null;
-      if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) {
-        whaleRawOk = false;
-        continue;
-      }
+      const raw = t.amount_raw && String(t.amount_raw).trim() !== "" ? String(t.amount_raw) : null;
+      if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) { whaleRawOk = false; continue; }
 
       const fromIs = topHolderSet.has((t.from_address || "").toLowerCase());
       const toIs = topHolderSet.has((t.to_address || "").toLowerCase());
@@ -378,14 +341,14 @@ export default function DailyAuditPage() {
       if (fromIs && !toIs) whaleOut += toBigIntSafe(raw);
     }
 
-    const whaleNet = whaleRawOk
+    const whaleNetFlow = whaleRawOk
       ? formatFromRaw18((whaleIn - whaleOut).toString(), 6, 2)
       : "0.00";
 
     return {
       activeWallets: walletSet.size,
-      transferVolume: volumeDisplay,
-      whaleNetFlow: whaleNet,
+      transferVolume,
+      whaleNetFlow,
       top10Concentration,
     };
   }, [holders, last24hTransfers]);
@@ -403,11 +366,7 @@ export default function DailyAuditPage() {
       label: "Last Updated",
       value: lastUpdatedISO ? formatDateTime(lastUpdatedISO) : "-",
     },
-    {
-      id: "window",
-      label: "Transfers Window",
-      value: windowLabel,
-    },
+    { id: "window", label: "Transfers Window", value: windowLabel },
   ];
 
   const confidenceCards: StatCardData[] = [
@@ -429,117 +388,101 @@ export default function DailyAuditPage() {
   ];
 
   return (
-    <div className="app-root">
-      <div className="app-shell">
-        <Header />
+    <DailyAuditLayout>
+      <Header />
 
-        {/* Status */}
-        <section className="panel panel--status">
-          <div className="panel-block">
-            <div className="panel-header-row">
-              <h2 className="panel-title">Daily BC400 Audit Report</h2>
-            </div>
-
-            <p className="panel-muted">
-              Live recap derived from your existing API: <b>/health</b>, <b>/summary</b>,{" "}
-              <b>/top-holders</b>, <b>/transfers/latest</b>
-            </p>
-
-            <div style={{ marginTop: 12 }}>
-              <StatsGrid stats={statusCards} />
-            </div>
-          </div>
-
-          {/* ✅ Right: ONLY these buttons now */}
-          <div className="daily-audit-actions">
-            <button
-              type="button"
-              className="pill-action-btn"
-              onClick={() => window.history.back()}
-            >
-              ← Back to dashboard
-            </button>
-
-            <button
-              type="button"
-              className="pill-action-btn"
-              onClick={load}
-              disabled={loading}
-            >
-              {loading ? "Refreshing..." : "↻ Refresh"}
-            </button>
-          </div>
-        </section>
-
-        {/* Confidence / Signals */}
-        <section className="panel panel--table">
+      <section className="panel panel--status">
+        <div className="panel-block">
           <div className="panel-header-row">
-            <h2 className="panel-title">Confidence Signals</h2>
-            <span className="panel-caption">{systemOnline ? "API Online" : "API Offline"}</span>
+            <h2 className="panel-title">Daily BC400 Audit Report</h2>
           </div>
 
-          <div style={{ marginTop: 8 }}>
-            <StatsGrid stats={confidenceCards} />
-          </div>
+          <p className="panel-muted">
+            Live recap derived from your existing API: <b>/health</b>, <b>/summary</b>,{" "}
+            <b>/top-holders</b>, <b>/transfers/latest</b>
+          </p>
 
-          <div style={{ marginTop: 14 }}>
-           <DailyAuditRoadmap
-  systemOnline={systemOnline}
-  indexedBlock={indexedBlock}
-  transfers24hCount={last24hTransfers.length}
-/>
+          <div style={{ marginTop: 12 }}>
+            <StatsGrid stats={statusCards} />
           </div>
-        </section>
+        </div>
 
-        {/* Liquidity */}
-        <section className="panel panel--table">
-          <div className="panel-header-row">
-            <h2 className="panel-title">Liquidity</h2>
-            <span className="panel-caption">Not yet available from current endpoints</span>
-          </div>
+        <div className="daily-audit-actions">
+          <button type="button" className="pill-action-btn" onClick={() => window.history.back()}>
+            ← Back to dashboard
+          </button>
 
-          <div className="panel-muted">
-            <b>LP lock:</b> not yet available from current endpoints
-            <div style={{ marginTop: 6 }}>
-              To make this investor-grade, we’ll add on-chain DEX pair detection + locker detection
-              (PinkLock/Unicrypt/TeamFinance, etc) then show:
-              <ul>
-                <li>Pair address + DEX (PancakeSwap v2/v3) + reserves</li>
-                <li>LP lock %, unlock date(s), and locker contract verification</li>
-                <li>Alerts on unlocks, liquidity pulls, ownership changes</li>
-              </ul>
-            </div>
-          </div>
-        </section>
+          <button type="button" className="pill-action-btn" onClick={load} disabled={loading}>
+            {loading ? "Refreshing..." : "↻ Refresh"}
+          </button>
+        </div>
+      </section>
 
-        {/* Whale Activity */}
-        <section className="panel panel--table">
-          <div className="panel-header-row">
-            <h2 className="panel-title">Whale Activity</h2>
-            <span className="panel-caption">Based on top-holders + transfers (Last 24h)</span>
-          </div>
+      <section className="panel panel--table">
+        <div className="panel-header-row">
+          <h2 className="panel-title">Confidence Signals</h2>
+          <span className="panel-caption">{systemOnline ? "API Online" : "API Offline"}</span>
+        </div>
 
-          <div style={{ marginTop: 8 }}>
-            <StatsGrid stats={whaleCards} />
-          </div>
-        </section>
+        <div style={{ marginTop: 8 }}>
+          <StatsGrid stats={confidenceCards} />
+        </div>
 
-        {/* Holder / Wallet Activity */}
-        <section className="panel panel--table">
-          <div className="panel-header-row">
-            <h2 className="panel-title">Holder / Wallet Activity</h2>
-            <span className="panel-caption">Last 24h</span>
-          </div>
+        <div style={{ marginTop: 14 }}>
+          <DailyAuditRoadmap
+            systemOnline={systemOnline}
+            indexedBlock={indexedBlock}
+            transfers24hCount={last24hTransfers.length}
+          />
+        </div>
+      </section>
 
-          <div style={{ marginTop: 8 }}>
-            <StatsGrid stats={holderCards} />
-          </div>
+      <section className="panel panel--table">
+        <div className="panel-header-row">
+          <h2 className="panel-title">Liquidity</h2>
+          <span className="panel-caption">Not yet available from current endpoints</span>
+        </div>
 
-          <div className="panel-muted" style={{ marginTop: 10 }}>
-            Now using <b>/transfers/latest</b> (cursor pagination) instead of pulling 2000 rows from <b>/transfers</b>.
+        <div className="panel-muted">
+          <b>LP lock:</b> not yet available from current endpoints
+          <div style={{ marginTop: 6 }}>
+            To make this investor-grade, we’ll add on-chain DEX pair detection + locker detection
+            (PinkLock/Unicrypt/TeamFinance, etc) then show:
+            <ul>
+              <li>Pair address + DEX (PancakeSwap v2/v3) + reserves</li>
+              <li>LP lock %, unlock date(s), and locker contract verification</li>
+              <li>Alerts on unlocks, liquidity pulls, ownership changes</li>
+            </ul>
           </div>
-        </section>
-      </div>
-    </div>
+        </div>
+      </section>
+
+      <section className="panel panel--table">
+        <div className="panel-header-row">
+          <h2 className="panel-title">Whale Activity</h2>
+          <span className="panel-caption">Based on top-holders + transfers (Last 24h)</span>
+        </div>
+
+        <div style={{ marginTop: 8 }}>
+          <StatsGrid stats={whaleCards} />
+        </div>
+      </section>
+
+      <section className="panel panel--table">
+        <div className="panel-header-row">
+          <h2 className="panel-title">Holder / Wallet Activity</h2>
+          <span className="panel-caption">Last 24h</span>
+        </div>
+
+        <div style={{ marginTop: 8 }}>
+          <StatsGrid stats={holderCards} />
+        </div>
+
+        <div className="panel-muted" style={{ marginTop: 10 }}>
+          Now using <b>/transfers/latest</b> (cursor pagination) instead of pulling 2000 rows from{" "}
+          <b>/transfers</b>.
+        </div>
+      </section>
+    </DailyAuditLayout>
   );
 }

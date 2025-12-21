@@ -182,8 +182,12 @@ function normalizeTransfer(raw: any): Transfer {
     block_time: raw.block_time ?? raw.blockTime ?? raw.time ?? null,
     from_address: raw.from_address ?? raw.fromAddress ?? raw.from ?? "",
     to_address: raw.to_address ?? raw.toAddress ?? raw.to ?? "",
-    amount_bc400: raw.amount_bc400 ?? raw.amountBC400 ?? raw.amount ?? raw.value ?? null,
-    amount_raw: raw.raw_amount ?? raw.rawAmount ?? raw.amount_raw ?? null,
+    amount_bc400:
+      raw.amount_bc400 ?? raw.amountBC400 ?? raw.amount ?? raw.value ?? null,
+
+    // ✅ FIX: keep naming consistent with DailyAuditPage
+    amount_raw:
+      raw.raw_amount ?? raw.rawAmount ?? raw.amount_raw ?? raw.rawAmount18 ?? null,
   };
 }
 
@@ -192,7 +196,7 @@ function normalizeTransfer(raw: any): Transfer {
 // --------------------
 export default function DashboardPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [dexTotals, setDexTotals] = useState<DexTotals | null>(null); // ✅ FIXED: inside component
+  const [dexTotals, setDexTotals] = useState<DexTotals | null>(null);
   const [holders, setHolders] = useState<Holder[]>([]);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [systemOnline, setSystemOnline] = useState<boolean>(false);
@@ -291,7 +295,10 @@ export default function DashboardPage() {
   }
 
   const top20 = holders.slice(0, 20);
-  const visibleTransfers = transfers.slice(0, Math.min(transferShowCount, transfers.length));
+  const visibleTransfers = transfers.slice(
+    0,
+    Math.min(transferShowCount, transfers.length)
+  );
 
   // ✅ Prefer /summary totals, fallback to /dex/totals
   const boughtRaw =
@@ -374,12 +381,24 @@ export default function DashboardPage() {
             <h2 className="panel-title panel-title--system">System Health</h2>
             <div className="system-health-row">
               <span className="system-label">Indexer:</span>
-              <span className={systemOnline ? "system-value system-value--ok" : "system-value system-value--bad"}>
+              <span
+                className={
+                  systemOnline
+                    ? "system-value system-value--ok"
+                    : "system-value system-value--bad"
+                }
+              >
                 {systemOnline ? "Online" : "Offline"}
               </span>
 
               <span className="system-label system-label--spacer">API Base:</span>
-              <span className={systemOnline ? "system-value system-value--ok" : "system-value system-value--bad"}>
+              <span
+                className={
+                  systemOnline
+                    ? "system-value system-value--ok"
+                    : "system-value system-value--bad"
+                }
+              >
                 {systemOnline ? "Online" : "Offline"}
               </span>
             </div>
@@ -389,7 +408,9 @@ export default function DashboardPage() {
         <section className="panel panel--table">
           <div className="panel-header-row">
             <h2 className="panel-title">Top Holders</h2>
-            <span className="panel-caption">Showing top {top20.length} wallets</span>
+            <span className="panel-caption">
+              Showing top {top20.length} wallets
+            </span>
           </div>
 
           {top20.length === 0 ? (
@@ -435,7 +456,15 @@ export default function DashboardPage() {
               Showing {visibleTransfers.length} of {transfers.length} loaded
             </span>
 
-            <div className="panel-header-actions" style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+            <div
+              className="panel-header-actions"
+              style={{
+                marginLeft: "auto",
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+              }}
+            >
               <button
                 type="button"
                 className="pill-action-btn"
@@ -461,7 +490,10 @@ export default function DashboardPage() {
           {visibleTransfers.length === 0 ? (
             <p className="panel-muted">No transfers found.</p>
           ) : (
-            <div className="table-scroll table-scroll--recent" ref={recentTransfersScrollRef}>
+            <div
+              className="table-scroll table-scroll--recent"
+              ref={recentTransfersScrollRef}
+            >
               <table className="data-table data-table--transfers">
                 <thead>
                   <tr>
@@ -474,7 +506,9 @@ export default function DashboardPage() {
                 </thead>
                 <tbody>
                   {visibleTransfers.map((t, idx) => (
-                    <tr key={`${t.block_number}-${idx}-${t.from_address}-${t.to_address}`}>
+                    <tr
+                      key={`${t.block_number}-${idx}-${t.from_address}-${t.to_address}`}
+                    >
                       <td className="col-block">{formatNumber(t.block_number)}</td>
                       <td className="col-time">{formatDateTime(t.block_time)}</td>
                       <td className="address-cell">{t.from_address}</td>
