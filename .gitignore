@@ -60,7 +60,15 @@ backend/pgdata
 backend/*.db
 backend/*dump*.sql
 
+<<<<<<< HEAD
 # Env
 .env
 .env.*
 !.env.example
+=======
+# env files (never commit)
+.env
+.env.*
+**/.env
+**/.env.*
+>>>>>>> 25d3f50 (Stop tracking env files and ignore env files)

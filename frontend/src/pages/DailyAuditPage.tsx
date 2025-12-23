@@ -222,6 +222,9 @@ export default function DailyAuditPage() {
   const [lastUpdatedISO, setLastUpdatedISO] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // ✅ triggers DailyAuditRoadmap re-fetch too
+  const [refreshKey, setRefreshKey] = useState(0);
+
   async function load() {
     setLoading(true);
     try {
@@ -250,12 +253,17 @@ export default function DailyAuditPage() {
       setTransfers(latest.transfers);
 
       setLastUpdatedISO(new Date().toISOString());
+
+      // ✅ bump AFTER successful load so roadmap refetches too
+      setRefreshKey((k) => k + 1);
     } catch (e) {
       console.error("Daily audit load failed:", e);
       setSystemOnline(false);
       setSummary(null);
       setHolders([]);
       setTransfers([]);
+      setLastUpdatedISO(new Date().toISOString());
+      setRefreshKey((k) => k + 1);
     } finally {
       setLoading(false);
     }
@@ -391,7 +399,7 @@ export default function DailyAuditPage() {
     <DailyAuditLayout>
       <Header />
 
-      <section className="panel panel--status">
+      <section className="panel panel--status panel--audit-status">
         <div className="panel-block">
           <div className="panel-header-row">
             <h2 className="panel-title">Daily BC400 Audit Report</h2>
@@ -402,8 +410,8 @@ export default function DailyAuditPage() {
             <b>/top-holders</b>, <b>/transfers/latest</b>
           </p>
 
-          <div style={{ marginTop: 12 }}>
-            <StatsGrid stats={statusCards} />
+          <div className="daily-audit-header-grid">
+            <StatsGrid stats={statusCards} columns={3} />
           </div>
         </div>
 
@@ -412,6 +420,7 @@ export default function DailyAuditPage() {
             ← Back to dashboard
           </button>
 
+          {/* ✅ this now refreshes EVERYTHING on the page */}
           <button type="button" className="pill-action-btn" onClick={load} disabled={loading}>
             {loading ? "Refreshing..." : "↻ Refresh"}
           </button>
@@ -427,12 +436,21 @@ export default function DailyAuditPage() {
         <div style={{ marginTop: 8 }}>
           <StatsGrid stats={confidenceCards} />
         </div>
+      </section>
 
-        <div style={{ marginTop: 14 }}>
+      {/* ✅ Roadmap stays its OWN panel/card (like your screenshot target) */}
+      <section className="panel panel--table">
+        <div className="panel-header-row">
+          <h2 className="panel-title">Daily Audit</h2>
+          <span className="panel-caption">Live + next + planned modules</span>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
           <DailyAuditRoadmap
             systemOnline={systemOnline}
             indexedBlock={indexedBlock}
             transfers24hCount={last24hTransfers.length}
+            refreshKey={refreshKey}
           />
         </div>
       </section>

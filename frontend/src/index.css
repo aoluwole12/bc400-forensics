@@ -734,7 +734,289 @@ body {
 }
 
 .roadmap-pill--planned {
-  border-color: rgba(0, 0, 0, 0.35);
+  border-color: rgba(0, 0, 0, 0.35);/* =========================
+   Daily Audit header: make left side longer (fix empty space)
+   ========================= */
+
+.panel--audit-status {
+  grid-template-columns: minmax(0, 1fr) auto; /* left stretches, right fits buttons */
+  align-items: center;
+}
+
+/* make sure the left block actually fills */
+.panel--audit-status .panel-block {
+  width: 100%;
+}
+
+/* keep actions tight on the right */
+.panel--audit-status .daily-audit-actions {
+  justify-content: flex-end;
+  align-self: center;
+}
   color: rgba(255, 217, 54, 0.85);
   opacity: 0.9;
+}
+
+/* =========================
+   Daily Audit header: make the 3 boxes stretch
+   ========================= */
+
+.daily-audit-header-grid {
+  margin-top: 12px;
+  width: 100%;
+}
+
+/* force the 3 cards to stretch evenly and fill the whole row */
+.daily-audit-header-grid .stats-grid {
+  width: 100%;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+
+/* make each card expand */
+.daily-audit-header-grid .stats-card {
+  width: 100%;
+  min-width: 0;
+}
+
+/* optional: make the values wrap nicely without shrinking */
+.daily-audit-header-grid .stats-card-value {
+  white-space: pre-line;
+}
+.panel.panel--audit-status {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+/* =========================
+   Daily Audit Roadmap - make it “alive”
+   (no page structure changes)
+   ========================= */
+
+.audit-roadmap--alive {
+  position: relative;
+}
+
+.audit-roadmap-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.audit-roadmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: rgba(17, 17, 17, 0.72);
+  white-space: nowrap;
+}
+
+.audit-roadmap-legendText {
+  margin-left: 6px;
+  opacity: 0.85;
+}
+
+.audit-roadmap-stamp {
+  font-size: 11px;
+  color: rgba(17, 17, 17, 0.72);
+  white-space: nowrap;
+}
+.audit-roadmap-stampLabel {
+  font-weight: 700;
+}
+.audit-roadmap-stampValue {
+  font-weight: 800;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.25);
+  margin-left: 10px;
+}
+.legend-dot--live {
+  background: rgba(76, 212, 135, 0.95);
+  border-color: rgba(76, 212, 135, 0.95);
+}
+.legend-dot--next {
+  background: rgba(255, 217, 54, 0.9);
+  border-color: rgba(0, 0, 0, 0.45);
+}
+.legend-dot--planned {
+  background: rgba(0, 0, 0, 0.25);
+}
+.legend-dot--warn {
+  background: rgba(255, 77, 106, 0.95);
+  border-color: rgba(255, 77, 106, 0.95);
+}
+
+.audit-roadmap-item {
+  position: relative;
+  overflow: hidden;
+}
+
+/* subtle “live” shimmer */
+.audit-roadmap-item--live::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.10) 30%,
+    transparent 60%
+  );
+  transform: translateX(-60%);
+  animation: bcRoadmapShimmer 3.2s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes bcRoadmapShimmer {
+  0% { transform: translateX(-60%); }
+  100% { transform: translateX(60%); }
+}
+
+/* stronger hierarchy */
+.audit-roadmap-meta--strong {
+  font-weight: 800;
+  color: rgba(17, 17, 17, 0.92);
+}
+
+.audit-roadmap-kv {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  line-height: 1.35;
+}
+
+.kv-sep {
+  opacity: 0.65;
+  margin: 0 2px;
+}
+
+.audit-roadmap-faint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(17, 17, 17, 0.62);
+}
+
+/* loading state hint */
+.audit-roadmap-meta--loading {
+  opacity: 0.9;
+}
+.audit-roadmap-meta--loading b {
+  text-decoration: underline;
+}
+
+/* bullets that “feel alive” */
+.audit-roadmap-bullet--live {
+  background: rgba(76, 212, 135, 0.85);
+  border-color: rgba(76, 212, 135, 0.95);
+  box-shadow: 0 0 0 6px rgba(76, 212, 135, 0.10);
+  animation: bcPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes bcPulse {
+  0% { box-shadow: 0 0 0 0 rgba(76, 212, 135, 0.18); }
+  70% { box-shadow: 0 0 0 10px rgba(76, 212, 135, 0.00); }
+  100% { box-shadow: 0 0 0 0 rgba(76, 212, 135, 0.00); }
+}
+
+.audit-roadmap-bullet--next {
+  background: rgba(255, 217, 54, 0.75);
+  border-color: rgba(0, 0, 0, 0.45);
+}
+
+.audit-roadmap-bullet--planned {
+  background: rgba(0, 0, 0, 0.25);
+  border-color: rgba(0, 0, 0, 0.45);
+}
+
+.audit-roadmap-bullet--warn {
+  background: rgba(255, 77, 106, 0.85);
+  border-color: rgba(255, 77, 106, 0.95);
+  box-shadow: 0 0 0 6px rgba(255, 77, 106, 0.10);
+}
+
+/* ===== Daily Audit Roadmap: make it feel alive (no layout changes) ===== */
+
+.audit-roadmap-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.audit-roadmap-subtle {
+  font-size: 11px;
+  color: #3c3410;
+}
+
+/* Bigger, less “mini” pills */
+.roadmap-pill {
+  border-radius: 999px;
+  padding: 6px 12px;          /* was 4px 10px */
+  font-size: 11px;            /* was 10px */
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  background: rgba(0, 0, 0, 0.78);
+  color: #ffd936;
+  min-width: 70px;
+  text-align: center;
+}
+
+/* Add “live” bullets so the list feels active */
+.audit-roadmap-bullet--live {
+  background: rgba(76, 212, 135, 0.55);
+  border-color: rgba(76, 212, 135, 0.9);
+}
+
+.audit-roadmap-bullet--warn {
+  background: rgba(255, 77, 106, 0.55);
+  border-color: rgba(255, 77, 106, 0.9);
+}
+
+.audit-roadmap-bullet--next {
+  background: rgba(255, 217, 54, 0.35);
+  border-color: rgba(0, 0, 0, 0.45);
+}
+
+.audit-roadmap-bullet--planned {
+  background: rgba(0, 0, 0, 0.25);
+  border-color: rgba(0, 0, 0, 0.45);
+}
+
+/* Slightly richer item card look */
+.audit-roadmap-item {
+  border-radius: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+  background: rgba(255, 255, 255, 0.12); /* was 0.10 */
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+
+.audit-roadmap-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #3c3410;
+  line-height: 1.35;
+}
+.audit-roadmap-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.audit-roadmap-subtle {
+  font-size: 11px;
+  color: #3c3410;
 }
