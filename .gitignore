@@ -59,3 +59,8 @@ backend/pgdata
 # optional: local db artifacts (only if you don't want them in git)
 backend/*.db
 backend/*dump*.sql
+
+# Env
+.env
+.env.*
+!.env.example
