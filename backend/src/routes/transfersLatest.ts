@@ -5,10 +5,10 @@ type LatestTransfersRow = {
   tx_hash: string;
   log_index: number;
   block_number: number;
-  block_time: string; // timestamptz -> string
-  from_address: string;
-  to_address: string;
-  raw_amount: string; // numeric/bigint -> string
+  block_time: string | null;
+  from_address: string | null;
+  to_address: string | null;
+  raw_amount: string;
 };
 
 function clampInt(n: number, min: number, max: number) {
@@ -16,12 +16,9 @@ function clampInt(n: number, min: number, max: number) {
 }
 
 export function registerLatestTransfersRoute(app: Express, pool: Pool) {
-  // GET /transfers/latest?limit=50
-  // GET /transfers/latest?limit=50&cursorBlock=72315776&cursorLog=468
   app.get("/transfers/latest", async (req: Request, res: Response) => {
     try {
-      const limitRaw = String(req.query.limit ?? "50");
-      const limit = clampInt(Number.parseInt(limitRaw, 10) || 50, 1, 200);
+      const limit = clampInt(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1, 200);
 
       const cursorBlockRaw = req.query.cursorBlock;
       const cursorLogRaw = req.query.cursorLog;
@@ -36,8 +33,8 @@ export function registerLatestTransfersRoute(app: Express, pool: Pool) {
       let cursorLog = 0;
 
       if (hasCursor) {
-        cursorBlock = Number.parseInt(String(cursorBlockRaw), 10);
-        cursorLog = Number.parseInt(String(cursorLogRaw), 10);
+        cursorBlock = parseInt(String(cursorBlockRaw), 10);
+        cursorLog = parseInt(String(cursorLogRaw), 10);
 
         if (!Number.isFinite(cursorBlock) || !Number.isFinite(cursorLog)) {
           return res.status(400).json({
@@ -55,16 +52,16 @@ export function registerLatestTransfersRoute(app: Express, pool: Pool) {
           t.block_time,
           af.address AS from_address,
           at.address AS to_address,
-          t.raw_amount
+          t.raw_amount::text AS raw_amount
         FROM public.transfers t
-        JOIN public.addresses af ON af.id = t.from_address_id
-        JOIN public.addresses at ON at.id = t.to_address_id
+        LEFT JOIN public.addresses af ON af.id = t.from_address_id
+        LEFT JOIN public.addresses at ON at.id = t.to_address_id
       `;
 
       const sql = hasCursor
         ? `
           ${sqlBase}
-          WHERE (t.block_number, t.log_index) < ($1, $2)
+          WHERE (t.block_number, t.log_index) < ($1::bigint, $2::int)
           ORDER BY t.block_number DESC, t.log_index DESC
           LIMIT $3;
         `
@@ -79,14 +76,12 @@ export function registerLatestTransfersRoute(app: Express, pool: Pool) {
       const { rows } = await pool.query<LatestTransfersRow>(sql, params);
 
       const last = rows.length ? rows[rows.length - 1] : null;
-      const nextCursor = last
-        ? { blockNumber: last.block_number, logIndex: last.log_index }
-        : null;
+      const nextCursor = last ? { blockNumber: last.block_number, logIndex: last.log_index } : null;
 
-      res.json({ items: rows, nextCursor });
+      return res.json({ items: rows, nextCursor });
     } catch (err: any) {
       console.error("Error in /transfers/latest:", err);
-      res.status(500).json({
+      return res.status(500).json({
         error: "Failed to load latest transfers",
         details: err?.message ?? String(err),
       });
@@ -96,6 +91,6 @@ export function registerLatestTransfersRoute(app: Express, pool: Pool) {
   // Alias: /api/transfers/latest
   app.get("/api/transfers/latest", async (req: Request, res: Response) => {
     const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-    res.redirect(307, `/transfers/latest${qs}`);
+    return res.redirect(307, `/transfers/latest${qs}`);
   });
 }

@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:4000";
+import { apiGet } from "../api/client";
 
 type DexPrice = {
   ok: boolean;
   dex?: string;
-  pairAddress?: string;
+  pairAddress?: string | null;
   token?: string;
-  priceWbnb?: string | number;
-  priceUsd?: string | number;
-  marketCapUsd?: string | number;
+  priceWbnb?: string | number | null;
+  priceUsd?: string | number | null;
+  marketCapUsd?: string | number | null;
   updatedAt?: string;
   reason?: string;
 };
@@ -18,17 +17,9 @@ type LpLock = {
   ok: boolean;
   pairFound?: boolean;
   dex?: string;
-  pairAddress?: string;
+  pairAddress?: string | null;
   burn?: { burnedPct?: number };
-  updatedAt?: string;
-  reason?: string;
-};
-
-type SecurityRules = {
-  ok?: boolean;
-  version?: string;
-  transfers24h?: number;
-  newestIndexedBlock?: number;
+  warnings?: string[];
   updatedAt?: string;
   reason?: string;
 };
@@ -37,7 +28,7 @@ type FetchState<T> =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "ok"; data: T }
-  | { status: "missing" } // 404 or not implemented
+  | { status: "missing" } // 404
   | { status: "error"; message: string };
 
 function pillClass(kind: "live" | "next" | "planned" | "warn") {
@@ -47,7 +38,7 @@ function pillClass(kind: "live" | "next" | "planned" | "warn") {
   return "roadmap-pill roadmap-pill--planned";
 }
 
-function shortAddr(a?: string) {
+function shortAddr(a?: string | null) {
   if (!a) return "";
   const s = String(a);
   if (s.length <= 12) return s;
@@ -71,11 +62,24 @@ function fmtTime(d: Date) {
   });
 }
 
-function toExplainerPill(k: "live" | "next" | "planned" | "warn") {
-  if (k === "live") return "LIVE";
-  if (k === "warn") return "ISSUE";
-  if (k === "planned") return "PLANNED";
-  return "NEXT";
+// ✅ investor-grade numeric formatting (no fake $0, no scientific notation)
+function fmtCompactNumber(v: any, maxFrac = 8) {
+  const n = safeNum(v);
+  if (n === null) return "-";
+  // avoid scientific notation
+  return n.toLocaleString(undefined, { maximumFractionDigits: maxFrac });
+}
+
+function fmtUsd(v: any) {
+  const n = safeNum(v);
+  if (n === null || n <= 0) return "-";
+  return `$${n.toLocaleString(undefined, { maximumFractionDigits: 8, minimumFractionDigits: 2 })}`;
+}
+
+function fmtPct(v: any) {
+  const n = safeNum(v);
+  if (n === null || n <= 0) return "-";
+  return `${n.toFixed(2)}%`;
 }
 
 export function DailyAuditRoadmap(props: {
@@ -88,7 +92,6 @@ export function DailyAuditRoadmap(props: {
 
   const [dex, setDex] = useState<FetchState<DexPrice>>({ status: "idle" });
   const [lp, setLp] = useState<FetchState<LpLock>>({ status: "idle" });
-  const [sec, setSec] = useState<FetchState<SecurityRules>>({ status: "idle" });
   const [lastChecked, setLastChecked] = useState<string>("");
 
   useEffect(() => {
@@ -97,19 +100,14 @@ export function DailyAuditRoadmap(props: {
     async function fetchOne<T>(path: string, set: (s: FetchState<T>) => void) {
       try {
         set({ status: "loading" });
-        const res = await fetch(`${API_BASE}${path}`);
+        const r = await apiGet<T>(path);
         if (cancelled) return;
 
-        if (res.status === 404) {
-          set({ status: "missing" });
-          return;
+        if (!r.ok) {
+          if (r.status === 404) return set({ status: "missing" });
+          return set({ status: "error", message: r.details ? `${r.error}: ${r.details}` : r.error });
         }
-        if (!res.ok) {
-          set({ status: "error", message: `HTTP ${res.status}` });
-          return;
-        }
-        const data = (await res.json()) as T;
-        set({ status: "ok", data });
+        set({ status: "ok", data: r.data });
       } catch (e: any) {
         if (cancelled) return;
         set({ status: "error", message: e?.message || String(e) });
@@ -120,7 +118,6 @@ export function DailyAuditRoadmap(props: {
 
     fetchOne<DexPrice>("/dex/price", setDex);
     fetchOne<LpLock>("/lp/lock", setLp);
-    fetchOne<SecurityRules>("/security/rules", setSec);
 
     return () => {
       cancelled = true;
@@ -136,20 +133,54 @@ export function DailyAuditRoadmap(props: {
     return parts.join(" · ");
   }, [systemOnline, indexedBlock, transfers24hCount]);
 
+  // ✅ LIVE Audit pill is strictly based on /health
   const livePill: "live" | "warn" = systemOnline ? "live" : "warn";
 
+  // ✅ Treat ok:false payloads as ISSUE (warn), even if HTTP 200
+  const dexOk = dex.status === "ok" && !!dex.data && (dex.data as any).ok === true;
+  const lpOk = lp.status === "ok" && !!lp.data && (lp.data as any).ok === true;
+
   const dexPill: "live" | "next" | "planned" | "warn" =
-    dex.status === "ok" ? "live" : dex.status === "missing" ? "next" : dex.status === "error" ? "warn" : "next";
+    dex.status === "missing"
+      ? "next"
+      : dex.status === "error"
+        ? "warn"
+        : dex.status === "ok"
+          ? dexOk
+            ? "live"
+            : "warn"
+          : "next";
 
   const lpPill: "live" | "next" | "planned" | "warn" =
-    lp.status === "ok" ? "live" : lp.status === "missing" ? "next" : lp.status === "error" ? "warn" : "next";
+    lp.status === "missing"
+      ? "next"
+      : lp.status === "error"
+        ? "warn"
+        : lp.status === "ok"
+          ? lpOk
+            ? "live"
+            : "warn"
+          : "next";
 
-  const secPill: "live" | "next" | "planned" | "warn" =
-    sec.status === "ok" ? "live" : sec.status === "missing" ? "planned" : sec.status === "error" ? "warn" : "planned";
+  // ❌ /security/rules is NOT live -> keep PLANNED always (don’t fetch, don’t break)
+  const secPill: "planned" = "planned";
 
   function openInvestorExplainer() {
-    // ✅ Create snapshot in sessionStorage (same-origin safe)
     const key = `roadmap_snapshot_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+    const dexIssue =
+      dex.status === "ok" && dex.data && (dex.data as any).ok === false
+        ? dex.data.reason || "ok:false"
+        : dex.status === "error"
+          ? dex.message
+          : dex.status;
+
+    const lpIssue =
+      lp.status === "ok" && lp.data && (lp.data as any).ok === false
+        ? lp.data.reason || "ok:false"
+        : lp.status === "error"
+          ? lp.message
+          : lp.status;
 
     const snapshot = {
       createdAt: new Date().toISOString(),
@@ -159,31 +190,32 @@ export function DailyAuditRoadmap(props: {
       indexedBlock,
       transfers24hCount,
 
-      dex: dex.status === "ok" ? dex.data : { reason: dex.status === "error" ? dex.message : dex.status },
-      lp: lp.status === "ok" ? lp.data : { reason: lp.status === "error" ? lp.message : lp.status },
-      sec: sec.status === "ok" ? sec.data : { reason: sec.status === "error" ? sec.message : sec.status },
+      dex: dex.status === "ok" ? dex.data : { reason: dex.status },
+      lp: lp.status === "ok" ? lp.data : { reason: lp.status },
+
+      issues: {
+        dex: dexPill === "warn" ? dexIssue : null,
+        lp: lpPill === "warn" ? lpIssue : null,
+        sec: "planned",
+      },
 
       uiHints: {
-        dexPill: toExplainerPill(dexPill),
-        lpPill: toExplainerPill(lpPill),
-        secPill: toExplainerPill(secPill),
+        dexPill: dexPill === "live" ? "LIVE" : dexPill === "warn" ? "ISSUE" : "NEXT",
+        lpPill: lpPill === "live" ? "LIVE" : lpPill === "warn" ? "ISSUE" : "NEXT",
+        secPill: "PLANNED",
       },
     };
 
     try {
       sessionStorage.setItem(key, JSON.stringify(snapshot));
-    } catch {
-      // if storage fails, the explainer page will show the fallback message
-    }
+    } catch {}
 
-    // ✅ Open the explainer route in a new tab
     const url = `/daily-audit/roadmap-explainer?id=${encodeURIComponent(key)}`;
     window.open(url, "_blank");
   }
 
   return (
     <div className="audit-roadmap">
-      {/* Top bar inside Roadmap (ONLY) */}
       <div className="audit-roadmap-topbar">
         <div className="audit-roadmap-subtle">
           <b>Last checked:</b> {lastChecked || "-"}
@@ -218,15 +250,21 @@ export function DailyAuditRoadmap(props: {
         </div>
 
         {dex.status === "ok" ? (
-          <div className="audit-roadmap-meta">
-            DEX: {dex.data.dex || "?"} · Pair: {shortAddr(dex.data.pairAddress)} · Token: {dex.data.token || "BC400"} ·
-            Price: {dex.data.priceWbnb ?? "-"} WBNB
-            {dex.data.priceUsd ? ` · ~$${dex.data.priceUsd}` : ""}
-            {dex.data.marketCapUsd ? ` · MC: ~$${dex.data.marketCapUsd}` : ""}
-          </div>
+          dex.data.ok === false ? (
+            <div className="audit-roadmap-meta">
+              <b>/dex/price</b> returned ok:false · {dex.data.reason || "Issue detected"}
+            </div>
+          ) : (
+            <div className="audit-roadmap-meta">
+              DEX: {dex.data.dex || "?"} · Pair: {shortAddr(dex.data.pairAddress)} · Token:{" "}
+              {shortAddr(dex.data.token || "BC400")} · Price: {fmtCompactNumber(dex.data.priceWbnb, 12)} WBNB
+              {dex.data.priceUsd ? ` · ${fmtUsd(dex.data.priceUsd)}` : ""}
+              {dex.data.marketCapUsd ? ` · MC: ${fmtUsd(dex.data.marketCapUsd)}` : ""}
+            </div>
+          )
         ) : dex.status === "missing" ? (
           <div className="audit-roadmap-meta">
-            Endpoint not available yet (<b>/dex/price</b>). When added, this line becomes live.
+            Endpoint not available yet (<b>/dex/price</b>).
           </div>
         ) : dex.status === "error" ? (
           <div className="audit-roadmap-meta">
@@ -246,14 +284,20 @@ export function DailyAuditRoadmap(props: {
         </div>
 
         {lp.status === "ok" ? (
-          <div className="audit-roadmap-meta">
-            Pair: {shortAddr(lp.data.pairAddress)} · LP Burned:{" "}
-            {safeNum(lp.data.burn?.burnedPct) !== null ? `${Number(lp.data.burn?.burnedPct).toFixed(2)}%` : "-"}
-            {" · "}Locker: not verified
-          </div>
+          lp.data.ok === false ? (
+            <div className="audit-roadmap-meta">
+              <b>/lp/lock</b> returned ok:false · {lp.data.reason || "Issue detected"}
+            </div>
+          ) : (
+            <div className="audit-roadmap-meta">
+              Pair: {shortAddr(lp.data.pairAddress)} · LP Burned: {fmtPct(lp.data.burn?.burnedPct)}
+              {" · "}Locker: not verified
+              {lp.data.warnings?.length ? ` · ${lp.data.warnings.join(" | ")}` : ""}
+            </div>
+          )
         ) : lp.status === "missing" ? (
           <div className="audit-roadmap-meta">
-            Endpoint not available yet (<b>/lp/lock</b>). When added, this line becomes live.
+            Endpoint not available yet (<b>/lp/lock</b>).
           </div>
         ) : lp.status === "error" ? (
           <div className="audit-roadmap-meta">
@@ -264,34 +308,16 @@ export function DailyAuditRoadmap(props: {
         )}
       </div>
 
-      {/* 4) Security Rules Engine */}
+      {/* 4) Security Rules Engine (PLANNED only) */}
       <div className="audit-roadmap-item">
         <div className="audit-roadmap-head">
           <div className="audit-roadmap-bullet" />
           <div className="audit-roadmap-name">Security Rules Engine</div>
-          <div className={pillClass(secPill)}>{secPill === "live" ? "LIVE" : secPill === "warn" ? "ISSUE" : "PLANNED"}</div>
+          <div className={pillClass(secPill)}>PLANNED</div>
         </div>
-
-        {sec.status === "ok" ? (
-          <div className="audit-roadmap-meta">
-            {sec.data.version ? `${sec.data.version} · ` : ""}
-            Transfers (24h): {typeof sec.data.transfers24h === "number" ? sec.data.transfers24h.toLocaleString() : "-"}
-            {" · "}Newest indexed:{" "}
-            {typeof sec.data.newestIndexedBlock === "number"
-              ? `#${sec.data.newestIndexedBlock.toLocaleString()}`
-              : indexedBlock !== null
-                ? `#${indexedBlock.toLocaleString()}`
-                : "-"}
-          </div>
-        ) : sec.status === "missing" ? (
-          <div className="audit-roadmap-meta">Planned advanced analytics (<b>/security/rules</b> not live yet).</div>
-        ) : sec.status === "error" ? (
-          <div className="audit-roadmap-meta">
-            Couldn’t load <b>/security/rules</b>: {sec.message}
-          </div>
-        ) : (
-          <div className="audit-roadmap-meta">Checking <b>/security/rules</b>…</div>
-        )}
+        <div className="audit-roadmap-meta">
+          Planned advanced analytics (endpoint not enabled yet). This will stay stable and won’t break the UI.
+        </div>
       </div>
     </div>
   );

@@ -2,70 +2,98 @@ import type { Express } from "express";
 import type { Pool } from "pg";
 
 function normAddr(a: string) {
-  return (a || "").trim().toLowerCase();
+  return String(a || "").trim().toLowerCase();
+}
+
+function isEvmAddress(a: string) {
+  return /^0x[a-f0-9]{40}$/.test(normAddr(a));
 }
 
 export function registerSummaryRoute(app: Express, pool: Pool) {
-  app.get("/summary", async (_req, res) => {
+  async function handler(_req: any, res: any) {
     try {
       const pairAddress = normAddr(process.env.BC400_PAIR_ADDRESS || "");
 
-      // Existing summary pieces (adjust column names if yours differ)
+      // Base summary (all-time)
       const base = await pool.query<{
-        first_block: number | null;
-        last_indexed_block: number | null;
-        total_transfers: number;
-        total_wallets: number;
+        first_block: string | null;
+        last_indexed_block: string | null;
+        total_transfers: string;
+        total_wallets: string;
       }>(`
         SELECT
-          (SELECT MIN(block_number) FROM public.transfers) AS first_block,
-          (SELECT MAX(block_number) FROM public.transfers) AS last_indexed_block,
-          (SELECT COUNT(*)::int FROM public.transfers) AS total_transfers,
-          (SELECT COUNT(*)::int FROM public.addresses) AS total_wallets
+          (SELECT MIN(block_number)::bigint FROM public.transfers) AS first_block,
+          (SELECT MAX(block_number)::bigint FROM public.transfers) AS last_indexed_block,
+          (SELECT COUNT(*)::bigint         FROM public.transfers) AS total_transfers,
+          (SELECT COUNT(*)::bigint         FROM public.addresses) AS total_wallets
       `);
 
-      let totalBoughtBc400Raw = "0";
-      let totalSoldBc400Raw = "0";
+      let pairAddressId: number | null = null;
+
+      // Defaults if pair not configured or not found
+      let totalBoughtBc400Raw = "0"; // pair -> wallets (BUY)
+      let totalSoldBc400Raw = "0";   // wallets -> pair (SELL)
       let totalBuyTransfers = 0;
       let totalSellTransfers = 0;
 
-      // If we have the pair address, compute BUY/SELL aggregates "to date"
-      if (pairAddress) {
-        const agg = await pool.query<{
-          bought_raw: string;
-          sold_raw: string;
-          buy_count: number;
-          sell_count: number;
-        }>(`
-          WITH pair AS (
-            SELECT id
-            FROM public.addresses
-            WHERE LOWER(address) = $1
-            LIMIT 1
-          )
-          SELECT
-            COALESCE(SUM(CASE WHEN t.from_address_id = (SELECT id FROM pair) THEN t.raw_amount::numeric ELSE 0 END), 0)::text AS bought_raw,
-            COALESCE(SUM(CASE WHEN t.to_address_id   = (SELECT id FROM pair) THEN t.raw_amount::numeric ELSE 0 END), 0)::text AS sold_raw,
-            COALESCE(SUM(CASE WHEN t.from_address_id = (SELECT id FROM pair) THEN 1 ELSE 0 END), 0)::int AS buy_count,
-            COALESCE(SUM(CASE WHEN t.to_address_id   = (SELECT id FROM pair) THEN 1 ELSE 0 END), 0)::int AS sell_count
-          FROM public.transfers t
-          WHERE (SELECT id FROM pair) IS NOT NULL
-        `, [pairAddress]);
+      if (isEvmAddress(pairAddress)) {
+        // Resolve pair id first (fast lookup)
+        const pairRow = await pool.query<{ id: number }>(
+          `SELECT id FROM public.addresses WHERE lower(address) = $1 LIMIT 1;`,
+          [pairAddress]
+        );
 
-        totalBoughtBc400Raw = agg.rows[0]?.bought_raw ?? "0";
-        totalSoldBc400Raw = agg.rows[0]?.sold_raw ?? "0";
-        totalBuyTransfers = agg.rows[0]?.buy_count ?? 0;
-        totalSellTransfers = agg.rows[0]?.sell_count ?? 0;
+        if (pairRow.rowCount > 0) {
+          pairAddressId = pairRow.rows[0].id;
+
+          const agg = await pool.query<{
+            bought_raw: string;
+            sold_raw: string;
+            buy_count: string;
+            sell_count: string;
+          }>(
+            `
+            SELECT
+              -- BUY = pair sends BC400 out to wallets
+              COALESCE(SUM(CASE WHEN t.from_address_id = $1 THEN t.raw_amount::numeric ELSE 0 END), 0)::text AS bought_raw,
+              -- SELL = wallets send BC400 into pair
+              COALESCE(SUM(CASE WHEN t.to_address_id   = $1 THEN t.raw_amount::numeric ELSE 0 END), 0)::text AS sold_raw,
+
+              COALESCE(COUNT(*) FILTER (WHERE t.from_address_id = $1), 0)::bigint::text AS buy_count,
+              COALESCE(COUNT(*) FILTER (WHERE t.to_address_id   = $1), 0)::bigint::text AS sell_count
+            FROM public.transfers t
+            WHERE t.from_address_id = $1 OR t.to_address_id = $1;
+            `,
+            [pairAddressId]
+          );
+
+          totalBoughtBc400Raw = agg.rows[0]?.bought_raw ?? "0";
+          totalSoldBc400Raw = agg.rows[0]?.sold_raw ?? "0";
+          totalBuyTransfers = Number(agg.rows[0]?.buy_count ?? "0");
+          totalSellTransfers = Number(agg.rows[0]?.sell_count ?? "0");
+        }
       }
 
       const row = base.rows[0];
-      res.json({
-        firstBlock: row?.first_block ?? null,
-        lastIndexedBlock: row?.last_indexed_block ?? null,
-        totalTransfers: row?.total_transfers ?? 0,
-        totalWallets: row?.total_wallets ?? 0,
 
-        // ✅ New fields
+      return res.json({
+        // chain/indexer coverage
+        firstBlock: row?.first_block ? Number(row.first_block) : null,
+        lastIndexedBlock: row?.last_indexed_block ? Number(row.last_indexed_block) : null,
+        totalTransfers: row?.total_transfers ? Number(row.total_transfers) : 0,
+        totalWallets: row?.total_wallets ? Number(row.total_wallets) : 0,
+
+        // pair context (investor-grade)
+        pairAddress: isEvmAddress(pairAddress) ? pairAddress : null,
+        pairAddressId,
+
+        definitions: {
+          buy: "BC400 outflow from LP pair to wallets (users buying BC400)",
+          sell: "BC400 inflow from wallets to LP pair (users selling BC400)",
+          rawAmount: "Token raw units as stored in transfers.raw_amount (not human decimals)",
+        },
+
+        // all-time DEX flow totals (raw units)
         totalBoughtBc400Raw,
         totalSoldBc400Raw,
         totalBuyTransfers,
@@ -73,7 +101,13 @@ export function registerSummaryRoute(app: Express, pool: Pool) {
       });
     } catch (err: any) {
       console.error("Error in /summary:", err);
-      res.status(500).json({ error: "Failed to load summary", details: String(err?.message || err) });
+      return res.status(500).json({
+        error: "Failed to load summary",
+        details: String(err?.message || err),
+      });
     }
-  });
+  }
+
+  app.get("/summary", handler);
+  app.get("/api/summary", handler);
 }

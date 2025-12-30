@@ -1,17 +1,9 @@
 import type { Express, Request, Response } from "express";
 import { Contract, JsonRpcProvider, getAddress } from "ethers";
 
-/**
- * Corrections added:
- * - safeChecksum always returns { ok:true, value } OR { ok:false, label, raw, error }
- * - decimals() fallback must be a number (uint8), not 18n
- * - validate pairRaw with isHexAddress BEFORE comparing to ZERO (case-insensitive)
- * - keep all checksummed comparisons consistent
- */
-
 const DEFAULT_BC400 = "0x61Fc93c7C070B32B1b1479B86056d8Ec1D7125BD";
-const RAW_WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
-const RAW_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73";
+const DEFAULT_WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
+const DEFAULT_FACTORY = "0xca143ce32fe78f1f7019d7d551a6402fc5350c73";
 
 const DEAD = "0x000000000000000000000000000000000000dEaD";
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -38,13 +30,19 @@ function safeChecksum(label: string, raw: string) {
 }
 
 function getProvider() {
-  const rpc =
-    process.env.RPC_URL ||
-    process.env.BSC_RPC_URL ||
-    process.env.NODEREAL_HTTP ||
-    "https://bsc-dataseed.binance.org/";
+  // ✅ matches your .env
+  const rpc = process.env.BSC_RPC_URL || process.env.RPC_URL || "https://bsc-dataseed.binance.org/";
   return new JsonRpcProvider(rpc);
 }
+
+const FACTORY_ABI = [
+  "function getPair(address tokenA, address tokenB) external view returns (address)",
+];
+
+const PAIR_ABI = [
+  "function token0() view returns (address)",
+  "function token1() view returns (address)",
+];
 
 const ERC20_ABI = [
   "function symbol() view returns (string)",
@@ -53,13 +51,10 @@ const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)",
 ];
 
-const FACTORY_ABI = [
-  "function getPair(address tokenA, address tokenB) external view returns (address)",
-];
-
 function handleError(res: Response, where: string, err: unknown) {
   console.error(`Error in ${where}:`, err);
   res.status(500).json({
+    ok: false,
     error: `Failed to load ${where}`,
     details: err instanceof Error ? err.message : String(err),
   });
@@ -67,11 +62,15 @@ function handleError(res: Response, where: string, err: unknown) {
 
 async function lpLockHandler(_req: Request, res: Response) {
   try {
+    const warnings: string[] = [];
+
     const RAW_BC400 = process.env.BC400_TOKEN_ADDRESS || DEFAULT_BC400;
+    const RAW_WBNB = process.env.WBNB_TOKEN_ADDRESS || DEFAULT_WBNB; // optional env
+    const RAW_FACTORY = process.env.PANCAKESWAP_V2_FACTORY || DEFAULT_FACTORY; // optional env
 
     const bc400 = safeChecksum("BC400_TOKEN_ADDRESS", RAW_BC400);
-    const wbnb = safeChecksum("WBNB", RAW_WBNB);
-    const factoryAddr = safeChecksum("PANCAKESWAP_FACTORY", RAW_FACTORY);
+    const wbnb = safeChecksum("WBNB_TOKEN_ADDRESS", RAW_WBNB);
+    const factoryAddr = safeChecksum("PANCAKESWAP_V2_FACTORY", RAW_FACTORY);
     const deadAddr = safeChecksum("DEAD", DEAD);
     const zeroAddr = safeChecksum("ZERO", ZERO);
 
@@ -97,7 +96,6 @@ async function lpLockHandler(_req: Request, res: Response) {
     const pairRaw: string = await factory.getPair(BC400, WBNB);
     const pairTrim = String(pairRaw || "").trim();
 
-    // Validate pair string first (factory can return 0x000...0)
     if (!isHexAddress(pairTrim)) {
       return res.status(200).json({
         ok: false,
@@ -107,22 +105,48 @@ async function lpLockHandler(_req: Request, res: Response) {
       });
     }
 
-    // Compare against ZERO safely (case-insensitive)
     if (pairTrim.toLowerCase() === ZERO.toLowerCase()) {
       return res.json({
         ok: true,
         pairFound: false,
+        dex: "PancakeSwap v2",
         reason: "No PancakeSwap v2 pair found",
         updatedAt: new Date().toISOString(),
       });
     }
 
     const pair = getAddress(pairTrim);
+
+    // ✅ investor-grade: confirm the pair is BC400/WBNB
+    const pairC = new Contract(pair, PAIR_ABI, provider);
+    const [token0, token1] = await Promise.all([pairC.token0(), pairC.token1()]);
+    const t0 = getAddress(String(token0));
+    const t1 = getAddress(String(token1));
+
+    if (!((t0 === BC400 && t1 === WBNB) || (t0 === WBNB && t1 === BC400))) {
+      return res.status(200).json({
+        ok: false,
+        pairFound: true,
+        dex: "PancakeSwap v2",
+        pairAddress: pair,
+        reason: `Pair tokens mismatch (token0=${t0}, token1=${t1})`,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    // ✅ warn if configured pair doesn’t match factory
+    const expectedPairRaw = String(process.env.BC400_PAIR_ADDRESS || "").trim();
+    if (expectedPairRaw && isHexAddress(expectedPairRaw)) {
+      const expectedPair = getAddress(expectedPairRaw);
+      if (pair.toLowerCase() !== expectedPair.toLowerCase()) {
+        warnings.push(`Factory pair mismatch: expected ${expectedPair} but got ${pair}`);
+      }
+    }
+
     const lp = new Contract(pair, ERC20_ABI, provider);
 
     const [symbol, decimalsRaw, totalSupply, deadBal, zeroBal] = await Promise.all([
       lp.symbol().catch(() => "LP"),
-      // ✅ uint8 -> number fallback, not bigint
       lp.decimals().catch(() => 18),
       lp.totalSupply(),
       lp.balanceOf(DEAD_ADDR),
@@ -141,6 +165,9 @@ async function lpLockHandler(_req: Request, res: Response) {
       pairFound: true,
       dex: "PancakeSwap v2",
       pairAddress: pair,
+      expectedPairAddress:
+        expectedPairRaw && isHexAddress(expectedPairRaw) ? getAddress(expectedPairRaw) : null,
+      warnings,
       lp: { symbol, decimals },
       burn: {
         totalSupplyRaw: (totalSupply as bigint).toString(),
