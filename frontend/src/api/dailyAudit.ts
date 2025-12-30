@@ -96,7 +96,30 @@ export type Transfer = {
 };
 
 /** =========================
+ * NEW: Investor Adjusted (for the 4 cards)
+ * This matches what DailyAuditPage.tsx expects
+ * ========================= */
+export type InvestorAdjusted = {
+  ok: boolean;
+  reason?: string;
+
+  trueCirculatingRaw?: string; // raw 18-decimal units
+  top10PctOfTrueCirculating?: number; // 0..100
+  effectiveConcentrationPct?: number; // HHI*100
+  effectiveHolders?: number; // ~1/HHI
+
+  excluded?: {
+    burnedRaw?: string;
+    lpRaw?: string;
+    lockedRaw?: string;
+  };
+
+  updatedAt?: string;
+};
+
+/** =========================
  * NEW: /api/daily-audit response types
+ * (kept as-is)
  * ========================= */
 export type DailyAuditAdjusted = {
   excluded?: Array<{ address: string }>;
@@ -147,14 +170,9 @@ export type DailyAuditResponse = {
     circulatingSupply?: number | string | null;
 
     priceUsd?: number | string | null;
-
-    // ✅ new backend meaning: real circulating market cap
     marketCapUsd?: number | string | null;
-
-    // ✅ FDV (old stored market cap)
     fdvUsd?: number | string | null;
 
-    // back-compat key from backend
     marketcapUsdLegacy?: number | string | null;
 
     metadata?: any;
@@ -197,8 +215,11 @@ export type DailyAuditBundle = {
 
   dexTotals?: DexTotals | null;
 
-  /** ✅ NEW: raw daily-audit payload (for Investor Snapshot adjusted cards) */
+  /** raw daily-audit payload */
   dailyAudit?: DailyAuditResponse | null;
+
+  /** ✅ what the 4 cards need */
+  investorAdjusted?: InvestorAdjusted | null;
 };
 
 async function fetchJson<T>(
@@ -308,9 +329,8 @@ export async function fetchLatestTransfersCovering24h(): Promise<{
   return { transfers: all, nextCursor: cursor, count24h: transfers24h.length };
 }
 
-/** ✅ NEW: fetch /api/daily-audit (preferred) */
+/** fetch /api/daily-audit (preferred) */
 export async function fetchDailyAuditRaw(): Promise<DailyAuditResponse | null> {
-  // try /api/daily-audit first, then /daily-audit for back-compat
   const a = await fetchJson<DailyAuditResponse>("/api/daily-audit");
   if (a.status === "ok") return a.data;
 
@@ -318,6 +338,38 @@ export async function fetchDailyAuditRaw(): Promise<DailyAuditResponse | null> {
   if (b.status === "ok") return b.data;
 
   return null;
+}
+
+/** ✅ fetch /api/investor/adjusted (preferred) */
+export async function fetchInvestorAdjusted(): Promise<InvestorAdjusted | null> {
+  const a = await fetchJson<InvestorAdjusted>("/api/investor/adjusted");
+  if (a.status === "ok") return a.data;
+
+  const b = await fetchJson<InvestorAdjusted>("/investor/adjusted");
+  if (b.status === "ok") return b.data;
+
+  // If endpoint doesn't exist yet, return a safe ok:false payload
+  if (a.status === "missing" || b.status === "missing") {
+    return {
+      ok: false,
+      reason: "Endpoint /investor/adjusted not available yet on backend.",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  // If it exists but errored, also return safe ok:false
+  const msg =
+    a.status === "error"
+      ? a.message
+      : b.status === "error"
+        ? b.message
+        : "Unknown error fetching /investor/adjusted";
+
+  return {
+    ok: false,
+    reason: msg,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 function toNumberMaybe(v: any): number | null {
@@ -330,9 +382,14 @@ function toNumberMaybe(v: any): number | null {
   return null;
 }
 
-export async function fetchDailyAuditBundle(opts?: { includeDexTotals?: boolean }): Promise<DailyAuditBundle> {
-  // Pull daily audit FIRST (this is what powers the "Adjusted" cards)
-  const dailyAudit = await fetchDailyAuditRaw();
+export async function fetchDailyAuditBundle(opts?: {
+  includeDexTotals?: boolean;
+}): Promise<DailyAuditBundle> {
+  // Pull both (these power the adjusted cards + some snapshot values)
+  const [dailyAudit, investorAdjusted] = await Promise.all([
+    fetchDailyAuditRaw(),
+    fetchInvestorAdjusted(),
+  ]);
 
   // Keep old data sources too (so nothing breaks)
   const [healthRes, summaryRes, holdersRes] = await Promise.all([
@@ -355,8 +412,7 @@ export async function fetchDailyAuditBundle(opts?: { includeDexTotals?: boolean 
   }
 
   // Transfers for the UI:
-  // Prefer daily-audit recent transfers (already limited + sorted),
-  // fallback to your /transfers/latest pagination.
+  // Prefer daily-audit recent transfers, fallback to /transfers/latest pagination.
   let transfers24h: Transfer[] = [];
   let transfers24hCount = 0;
 
@@ -369,7 +425,7 @@ export async function fetchDailyAuditBundle(opts?: { includeDexTotals?: boolean 
     transfers24hCount = latest.count24h;
   }
 
-  // Keep your existing endpoints
+  // Existing endpoints
   const [dexRes, lpRes, tokenRes] = await Promise.all([
     fetchJson<DexPrice>("/dex/price"),
     fetchJson<LpLock>("/lp/lock"),
@@ -380,7 +436,7 @@ export async function fetchDailyAuditBundle(opts?: { includeDexTotals?: boolean 
   const lpLock = lpRes.status === "ok" ? lpRes.data : null;
   const tokenBurn = tokenRes.status === "ok" ? tokenRes.data : null;
 
-  // ✅ If /dex/price is missing or partial, fill key values from daily-audit supply
+  // If /dex/price is missing or partial, fill from daily-audit supply
   if (dailyAudit?.supply) {
     const priceUsd = toNumberMaybe(dailyAudit.supply.priceUsd);
     const marketCapUsd = toNumberMaybe(dailyAudit.supply.marketCapUsd);
@@ -395,7 +451,8 @@ export async function fetchDailyAuditBundle(opts?: { includeDexTotals?: boolean 
       };
     } else {
       if (dexPrice.priceUsd == null && priceUsd != null) dexPrice.priceUsd = priceUsd;
-      if (dexPrice.marketCapUsd == null && marketCapUsd != null) dexPrice.marketCapUsd = marketCapUsd;
+      if (dexPrice.marketCapUsd == null && marketCapUsd != null)
+        dexPrice.marketCapUsd = marketCapUsd;
     }
   }
 
@@ -405,19 +462,24 @@ export async function fetchDailyAuditBundle(opts?: { includeDexTotals?: boolean 
     dexTotals = totalsRes.status === "ok" ? totalsRes.data : null;
   }
 
+  // Prefer backend timestamps if available
+  const lastUpdatedISO =
+    investorAdjusted?.updatedAt ||
+    dailyAudit?.generatedAt ||
+    new Date().toISOString();
+
   return {
     systemOnline,
     summary,
     holders,
     transfers24h,
     transfers24hCount,
-    lastUpdatedISO: new Date().toISOString(),
+    lastUpdatedISO,
     dexPrice,
     lpLock,
     tokenBurn,
     dexTotals,
-
-    // ✅ NEW: raw daily-audit payload for the "Adjusted" Investor Snapshot cards
     dailyAudit,
+    investorAdjusted,
   };
 }

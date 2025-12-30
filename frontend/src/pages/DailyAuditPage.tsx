@@ -13,50 +13,11 @@ import type {
   Summary,
   Holder,
   Transfer,
-  // ✅ IMPORTANT: remove TokenBurn import if your ../api/dailyAudit does not export it
-  // TokenBurn,
+  TokenBurn,
+  InvestorAdjusted,
 } from "../api/dailyAudit";
+
 import { fetchDailyAuditBundle } from "../api/dailyAudit";
-
-// ✅ Local TokenBurn type to prevent TS2305 build error
-type TokenBurn = {
-  ok: boolean;
-  reason?: string;
-  tokenAddress?: string;
-  token?: { symbol?: string; decimals?: number };
-  supply?: {
-    totalSupplyRaw?: string;
-    burnedRaw?: string;
-    circulatingRaw?: string;
-    burnedPct?: number;
-  };
-  burnWallets?: { dead?: string; zero?: string };
-  updatedAt?: string;
-};
-
-// ✅ NEW (1/5): “Adjusted/True Circulating” bundle payload (frontend-only, safe optional)
-// Backend can return this under bundle.investorAdjusted (or you can rename later).
-type InvestorAdjusted = {
-  ok: boolean;
-  reason?: string;
-
-  // Step 1–3 outputs
-  trueCirculatingRaw?: string; // recomputed “true circulating” in raw 18-decimal units
-
-  // Step 4 output
-  top10PctOfTrueCirculating?: number; // 0..100
-  effectiveConcentrationPct?: number; // HHI*100 (0..100)
-  effectiveHolders?: number; // ~1/HHI
-
-  // Optional debug context
-  excluded?: {
-    burnedRaw?: string;
-    lpRaw?: string;
-    lockedRaw?: string;
-  };
-
-  updatedAt?: string;
-};
 
 const BC400_DECIMALS = 18;
 
@@ -175,7 +136,6 @@ function safePct(v: any, digits = 2): string {
   return `${n.toFixed(digits)}%`;
 }
 
-// ✅ NEW (2/5): safer percent for numeric fields (already-number)
 function safePctNum(n: number | null | undefined, digits = 2): string {
   if (n === null || n === undefined) return "-";
   if (!Number.isFinite(n) || n < 0) return "-";
@@ -187,24 +147,9 @@ function looksIntString(v: any): boolean {
   return /^\d+$/.test(s);
 }
 
-// Convert huge bigint to a stable Number ratio without overflow (keeps relative shares)
-function scaledRatio(numer: bigint, denom: bigint): number | null {
-  if (denom <= 0n) return null;
-  const a = numer.toString();
-  const b = denom.toString();
-  const keep = 15;
-  const an = a.length > keep ? Number(a.slice(0, keep)) : Number(a);
-  const bn = b.length > keep ? Number(b.slice(0, keep)) : Number(b);
-  if (!Number.isFinite(an) || !Number.isFinite(bn) || bn <= 0) return null;
-  // adjust for different truncation lengths
-  const exp = (a.length - Math.min(a.length, keep)) - (b.length - Math.min(b.length, keep));
-  return (an / bn) * Math.pow(10, exp);
-}
-
 export default function DailyAuditPage() {
   const [bundle, setBundle] = useState<DailyAuditBundle | null>(null);
   const [loading, setLoading] = useState(false);
-
   const [refreshKey, setRefreshKey] = useState(0);
 
   async function load() {
@@ -265,43 +210,10 @@ export default function DailyAuditPage() {
     }
     const transferVolume = rawCount > 0 ? formatFromRaw18(sumRaw.toString(), 6, 2) : "-";
 
+    // top20 used for whale flows
     const top20 = holders.slice(0, 20);
-    const top10 = holders.slice(0, 10);
-
-    let top10Sum = 0n;
-    let top20Sum = 0n;
-    let okRaw = true;
-
-    for (const h of top10) {
-      const raw =
-        h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
-      if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) {
-        okRaw = false;
-        break;
-      }
-      top10Sum += toBigIntSafe(raw);
-    }
-
-    if (okRaw) {
-      for (const h of top20) {
-        const raw =
-          h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
-        if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) {
-          okRaw = false;
-          break;
-        }
-        top20Sum += toBigIntSafe(raw);
-      }
-    }
-
-    let top10Concentration = "-";
-    if (okRaw && top20Sum > 0n) {
-      const pctTimes1000 = (top10Sum * 100000n) / top20Sum;
-      const pct = Number(pctTimes1000) / 1000;
-      top10Concentration = `${pct.toFixed(1)}%`;
-    }
-
     const topHolderSet = new Set(top20.map((h) => h.address.toLowerCase()));
+
     let whaleIn = 0n;
     let whaleOut = 0n;
 
@@ -323,7 +235,6 @@ export default function DailyAuditPage() {
       activeWallets: walletSet.size,
       transferVolume,
       whaleNetFlow,
-      top10Concentration,
     };
   }, [holders, last24hTransfers]);
 
@@ -331,15 +242,15 @@ export default function DailyAuditPage() {
 
   const dex: DexPrice | null = bundle?.dexPrice ?? null;
   const lp: LpLock | null = bundle?.lpLock ?? null;
-  const tokenBurn: TokenBurn | null = (bundle as any)?.tokenBurn ?? null;
+  const tokenBurn: TokenBurn | null = bundle?.tokenBurn ?? null;
 
-  // ✅ NEW (3/5): read adjusted metrics (if backend sends it; otherwise cards show "-")
-   //  const investorAdjusted: InvestorAdjusted | null = (bundle as any)?.investorAdjusted ?? null;
   const investorAdjusted: InvestorAdjusted | null =
-  (bundle as any)?.investorAdjusted ??
-  (bundle as any)?.concentrationAdjusted ??
-  null;
-   const adjustedLive = !!investorAdjusted && investorAdjusted.ok === true;
+    bundle?.investorAdjusted ??
+    (bundle as any)?.concentrationAdjusted ??
+    (bundle as any)?.investorConcentration ??
+    null;
+
+  const adjustedLive = !!investorAdjusted && investorAdjusted.ok === true;
 
   const dexLive = !!dex && dex.ok === true;
   const lpLive = !!lp && lp.ok === true;
@@ -349,6 +260,14 @@ export default function DailyAuditPage() {
   const lpIssue = !!lp && lp.ok === false;
   const tokenIssue = !!tokenBurn && tokenBurn.ok === false;
 
+  // ✅ NEW: Risk is now injected by backend into /daily-audit response
+  const riskLatest = bundle?.dailyAudit?.risk?.latest ?? null;
+
+  const riskScoreCard =
+    riskLatest?.score !== null && riskLatest?.score !== undefined ? String(riskLatest.score) : "-";
+
+  const riskBandCard = riskLatest?.band ? String(riskLatest.band).toUpperCase() : "-";
+
   // Price from /dex/price (USD)
   const priceUsdNum =
     dexLive && dex?.priceUsd !== null && dex?.priceUsd !== undefined
@@ -357,23 +276,16 @@ export default function DailyAuditPage() {
 
   const priceUsdCard = dexLive ? safeUsd(dex?.priceUsd) : "-";
 
-  // Token burn + circulating (token supply burn)
+  // Token burn + circulating
   const tokenBurnedPct = tokenLive ? safePct(tokenBurn?.supply?.burnedPct, 2) : "-";
 
   const circulatingRawOk = tokenLive && looksIntString(tokenBurn?.supply?.circulatingRaw);
-  const circulatingRaw = circulatingRawOk
-    ? toBigIntSafe(String(tokenBurn!.supply!.circulatingRaw))
-    : 0n;
-
   const circulatingCard = circulatingRawOk
     ? `${formatFromRaw18(String(tokenBurn!.supply!.circulatingRaw), 6, 0)}`
     : "-";
 
-  // ✅ NEW: total supply + REAL market cap + FDV
+  // Total supply + market cap + FDV
   const totalSupplyRawOk = tokenLive && looksIntString(tokenBurn?.supply?.totalSupplyRaw);
-  const totalSupplyRaw = totalSupplyRawOk
-    ? toBigIntSafe(String(tokenBurn!.supply!.totalSupplyRaw))
-    : 0n;
 
   const circulatingNum =
     circulatingRawOk
@@ -385,13 +297,11 @@ export default function DailyAuditPage() {
       ? Number(formatFromRaw18(String(tokenBurn!.supply!.totalSupplyRaw), 12, 0).replace(/,/g, ""))
       : null;
 
-  // REAL Market Cap (circulating): price × circulating supply
   const marketCapUsdNum =
     priceUsdNum && priceUsdNum > 0 && circulatingNum && circulatingNum > 0
       ? priceUsdNum * circulatingNum
       : null;
 
-  // FDV: price × total supply
   const fdvUsdNum =
     priceUsdNum && priceUsdNum > 0 && totalSupplyNum && totalSupplyNum > 0
       ? priceUsdNum * totalSupplyNum
@@ -400,7 +310,6 @@ export default function DailyAuditPage() {
   const marketCapUsdCard = marketCapUsdNum !== null ? safeUsd(marketCapUsdNum) : "-";
   const fdvUsdCard = fdvUsdNum !== null ? safeUsd(fdvUsdNum) : "-";
 
-  // ✅ NEW (4/5): format adjusted (“true”) cards (do NOT touch existing eff/top10circ)
   const trueCirculatingCard =
     adjustedLive && looksIntString(investorAdjusted?.trueCirculatingRaw)
       ? `${formatFromRaw18(String(investorAdjusted!.trueCirculatingRaw), 6, 0)}`
@@ -410,7 +319,7 @@ export default function DailyAuditPage() {
     ? safePctNum(investorAdjusted?.top10PctOfTrueCirculating ?? null, 2)
     : "-";
 
-  const adjustedEffConcCard = adjustedLive
+  const effConcCard = adjustedLive
     ? `${safePctNum(investorAdjusted?.effectiveConcentrationPct ?? null, 2)}${
         Number.isFinite(investorAdjusted?.effectiveHolders as any)
           ? ` (≈${Number(investorAdjusted!.effectiveHolders!).toFixed(1)} effective holders)`
@@ -418,108 +327,12 @@ export default function DailyAuditPage() {
       }`
     : "-";
 
-  const adjustedEffHoldersCard =
+  const effHoldersCard =
     adjustedLive && Number.isFinite(investorAdjusted?.effectiveHolders as any)
       ? Number(investorAdjusted!.effectiveHolders!).toFixed(1)
       : "-";
 
-  // LP burn (LP tokens burned)
   const lpBurnedPct = lpLive ? safePct(lp?.burn?.burnedPct, 2) : "-";
-
-  const investorDerived = useMemo(() => {
-    let top10PctOfCirc = "-";
-    let effectiveConcentration = "-";
-    let riskScore = "-";
-    let riskBand = "-";
-
-    if (!(circulatingRawOk && circulatingRaw > 0n)) {
-      if (systemOnline) {
-        let score = 0;
-        if (!dexLive) score += 20;
-        if (!tokenLive) score += 35;
-        score = Math.max(0, Math.min(100, score));
-        riskScore = String(score);
-        riskBand =
-          score <= 25 ? "LOW" : score <= 50 ? "MODERATE" : score <= 75 ? "HIGH" : "CRITICAL";
-      }
-      return { top10PctOfCirc, effectiveConcentration, riskScore, riskBand };
-    }
-
-    // --- Top-10 % of circulating ---
-    const top10 = holders.slice(0, 10);
-    let top10Sum = 0n;
-    let okRaw = true;
-    for (const h of top10) {
-      const raw =
-        h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
-      if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) {
-        okRaw = false;
-        break;
-      }
-      top10Sum += toBigIntSafe(raw);
-    }
-    if (okRaw) {
-      const pctTimes10000 = (top10Sum * 1000000n) / circulatingRaw; // 2dp
-      const p = Number(pctTimes10000) / 10000;
-      if (Number.isFinite(p)) top10PctOfCirc = `${p.toFixed(2)}%`;
-    }
-
-    // --- Effective concentration (HHI% + effective holders) using top20 shares of circulating ---
-    const top20 = holders.slice(0, 20);
-    let hhi = 0; // 0..1
-    let shareSum = 0; // 0..1
-
-    for (const h of top20) {
-      const raw =
-        h.balance_raw && String(h.balance_raw).trim() !== "" ? String(h.balance_raw) : null;
-      if (!raw || !/^\d+$/.test(raw.replace(/,/g, ""))) continue;
-
-      const bal = toBigIntSafe(raw);
-      const share = scaledRatio(bal, circulatingRaw);
-      if (share === null || !Number.isFinite(share) || share <= 0) continue;
-
-      shareSum += share;
-      hhi += share * share;
-    }
-
-    if (hhi > 0 && Number.isFinite(hhi)) {
-      const effHolders = 1 / hhi;
-      effectiveConcentration = `${(hhi * 100).toFixed(2)}% (≈${effHolders.toFixed(
-        1
-      )} effective holders)`;
-    }
-
-    // --- Risk score / band ---
-    if (systemOnline) {
-      let score = 0;
-
-      if (!dexLive) score += 15;
-      if (!tokenLive) score += 30;
-
-      const p = Number(String(top10PctOfCirc).replace("%", ""));
-      if (Number.isFinite(p)) {
-        if (p >= 80) score += 35;
-        else if (p >= 60) score += 25;
-        else if (p >= 40) score += 12;
-        else if (p >= 25) score += 6;
-      } else {
-        score += 10;
-      }
-
-      if (shareSum >= 0.9) score += 10;
-      else if (shareSum >= 0.75) score += 6;
-
-      const burnP = Number(String(tokenBurnedPct).replace("%", ""));
-      if (Number.isFinite(burnP) && burnP >= 95) score += 5;
-
-      score = Math.max(0, Math.min(100, score));
-      riskScore = String(score);
-      riskBand =
-        score <= 25 ? "LOW" : score <= 50 ? "MODERATE" : score <= 75 ? "HIGH" : "CRITICAL";
-    }
-
-    return { top10PctOfCirc, effectiveConcentration, riskScore, riskBand };
-  }, [circulatingRawOk, circulatingRaw, holders, systemOnline, dexLive, tokenLive, tokenBurnedPct]);
 
   const statusCards: StatCardData[] = [
     {
@@ -540,38 +353,28 @@ export default function DailyAuditPage() {
     { id: "volume", label: "Transfer volume\n(BC400)", value: metrics.transferVolume },
     { id: "total-wallets", label: "Total wallets", value: formatNumber(summary?.totalWallets ?? null) },
     { id: "whale-net", label: "Whale net flow\n(BC400)", value: metrics.whaleNetFlow },
-    { id: "top10", label: "Top-10\nconcentration", value: metrics.top10Concentration },
     { id: "indexer", label: "Indexer snapshot", value: indexedBlock ? formatNumber(indexedBlock) : "-" },
   ];
 
-  // ✅ Investor Snapshot: relabel old MC to FDV and add real MC
   const investorCards: StatCardData[] = [
     { id: "t24", label: "Transfers (24h)\n(server)", value: formatNumber(last24hTransfers.length) },
     { id: "aw24", label: "Active wallets (24h)\n(server)", value: formatNumber(metrics.activeWallets) },
 
     { id: "pUsd", label: "Price (USD)\n(snapshot)", value: priceUsdCard },
 
-    // ✅ NEW: Real Market Cap (circulating)
     { id: "mcReal", label: "Market Cap (USD)\n(circulating)", value: marketCapUsdCard },
-
-    // ✅ Relabeled: FDV (total supply)
     { id: "fdv", label: "FDV (USD)\n(total supply)", value: fdvUsdCard },
 
     { id: "circ", label: "Circulating\n(snapshot)", value: circulatingCard },
     { id: "burned", label: "Token burned\n(snapshot)", value: tokenBurnedPct },
 
-    { id: "risk", label: "Risk score\n(latest)", value: investorDerived.riskScore },
-    { id: "band", label: "Risk band\n(latest)", value: investorDerived.riskBand },
+    { id: "risk", label: "Risk score\n(latest)", value: riskScoreCard },
+    { id: "band", label: "Risk band\n(latest)", value: riskBandCard },
 
-    // ✅ DO NOT TOUCH existing “current” concentration cards:
-    { id: "eff", label: "Effective\nconcentration", value: investorDerived.effectiveConcentration },
-    { id: "top10circ", label: "Top-10 % of\ncirculating", value: investorDerived.top10PctOfCirc },
-
-    // ✅ NEW (5/5): Add NEW “adjusted” cards (extra cards only)
-    { id: "trueCirc", label: "True circulating\n(adjusted)", value: trueCirculatingCard },
+    { id: "trueCirc", label: "True circulating", value: trueCirculatingCard },
     { id: "top10True", label: "Top-10 % of\ntrue circulating", value: top10PctTrueCircCard },
-    { id: "effAdj", label: "Effective concentration\n(adjusted)", value: adjustedEffConcCard },
-    { id: "effHAdj", label: "Adjusted effective\nholders", value: adjustedEffHoldersCard },
+    { id: "effConc", label: "Effective concentration", value: effConcCard },
+    { id: "effH", label: "Effective holders", value: effHoldersCard },
   ];
 
   const whaleCards: StatCardData[] = [
@@ -640,8 +443,8 @@ export default function DailyAuditPage() {
           <b>/token/burn</b> · Market Cap = price × circulating · FDV = price × total supply · LP burn shown in{" "}
           <b>Liquidity</b> (<b>/lp/lock</b>).
           <div style={{ marginTop: 6 }}>
-            <b>Adjusted metrics:</b> True circulating + adjusted concentration require backend exclusions
-            (burn wallets + LP + locks). If backend hasn’t shipped it yet, these cards will show “-”.
+            <b>True circulating + concentration:</b> requires backend exclusions (burn wallets + LP + locks).
+            If backend hasn’t shipped it yet, these cards will show “-”.
           </div>
         </div>
 
@@ -656,7 +459,7 @@ export default function DailyAuditPage() {
 
         {!!investorAdjusted && !adjustedLive && (
           <div className="panel-muted" style={{ marginTop: 10 }}>
-            <b>Adjusted metrics status:</b> ok:false — {investorAdjusted.reason || "No reason provided"}
+            <b>True metrics status:</b> ok:false — {investorAdjusted.reason || "No reason provided"}
           </div>
         )}
       </section>

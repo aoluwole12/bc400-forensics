@@ -1,6 +1,9 @@
 import type { Express } from "express";
 import type { Pool } from "pg";
 
+// ✅ NEW: live risk calculator (backend file)
+import { computeRiskFromDailyAudit } from "../analytics/risk";
+
 export function registerDailyAuditRoute(app: Express, pool: Pool) {
   const handler = async (_req: any, res: any) => {
     const client = await pool.connect();
@@ -96,18 +99,6 @@ transfer_window AS (
       WHERE x.addr_id IS NOT NULL
     ) AS active_wallets_24h
   FROM public.transfers t
-),
-
-latest_risk AS (
-  SELECT
-    day,
-    score,
-    band,
-    reasons,
-    created_at
-  FROM public.risk_scores
-  ORDER BY created_at DESC
-  LIMIT 1
 ),
 
 top10 AS (
@@ -329,24 +320,26 @@ SELECT jsonb_build_object(
     'top10PctOfTrueCirculating', (SELECT top10_pct_true_circulating FROM adjusted_effective),
     'effectiveConcentrationPct', (SELECT effective_concentration_pct_true FROM adjusted_effective),
     'effectiveHolders', (SELECT effective_holders_true FROM adjusted_effective)
-  ),
-
-  'risk', jsonb_build_object(
-    'latest', jsonb_build_object(
-      'day',       (SELECT day FROM latest_risk),
-      'score',     (SELECT score FROM latest_risk),
-      'band',      (SELECT band FROM latest_risk),
-      'reasons',   (SELECT reasons FROM latest_risk),
-      'createdAt', (SELECT created_at FROM latest_risk)
-    )
   )
+
+  -- ✅ NOTE: We REMOVED the SQL-built risk object on purpose.
+  -- Risk is now computed in Node from the returned bundle.
 ) AS daily_audit_json;
 `;
 
       const { rows } = await client.query(sql);
 
       await client.query("COMMIT");
-      return res.json(rows?.[0]?.daily_audit_json ?? {});
+
+      const daily = rows?.[0]?.daily_audit_json ?? {};
+
+      // ✅ compute risk LIVE from the bundle you just produced
+      const risk = computeRiskFromDailyAudit(daily);
+
+      // ✅ inject into bundle (same shape your frontend expects)
+      daily.risk = { latest: risk };
+
+      return res.json(daily);
     } catch (err: any) {
       try {
         await client.query("ROLLBACK");

@@ -18,6 +18,7 @@ import { registerSummaryRoute } from "./routes/summary";
 import { registerDebugAddressesRoute } from "./routes/debugAddresses";
 import { registerDailyAuditRoute } from "./routes/dailyAudit";
 import { registerTokenBurnRoute } from "./routes/tokenBurn";
+import { registerInvestorAdjustedRoute } from "./routes/investorAdjusted";
 
 const PORT = Number(process.env.PORT || 4000);
 const app = express();
@@ -238,6 +239,8 @@ registerDebugAddressesRoute(app);
 registerDailyAuditRoute(app, pool);
 registerLatestTransfersRoute(app, pool);
 registerTokenBurnRoute(app);
+registerInvestorAdjustedRoute(app, pool);
+
 // ✅ START SUPPLY SNAPSHOT CRON (the function itself checks ENABLE_SUPPLY_SNAPSHOT_CRON)
 startSupplySnapshotCron(pool);
 
