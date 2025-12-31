@@ -242,8 +242,12 @@ registerTokenBurnRoute(app);
 registerInvestorAdjustedRoute(app, pool);
 
 // ✅ START SUPPLY SNAPSHOT CRON (the function itself checks ENABLE_SUPPLY_SNAPSHOT_CRON)
-startSupplySnapshotCron(pool);
-
+if (process.env.RUN_SUPPLY_CRON_IN_API === "true") {
+  startSupplySnapshotCron(pool);
+  console.log("✅ Supply snapshot cron running inside API");
+} else {
+  console.log("ℹ️ Supply snapshot cron NOT running in API");
+}
 /*
 // ✅ START SUPPLY SNAPSHOT CRON (after pool + routes are ready, before listen)
 if (process.env.ENABLE_SUPPLY_CRON === "true") {
