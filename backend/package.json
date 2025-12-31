@@ -12,7 +12,7 @@
     "build": "tsc",
 
     "start": "node dist/api.js",
-    "start:indexer": "node dist/indexer.js",
+    "indexer": "npm run build && node dist/indexer.js",
     "start:backfill": "node dist/backfill.js",
     "start:worker": "node dist/worker.js",
 
