@@ -3,23 +3,31 @@
   "version": "1.0.0",
   "private": true,
   "main": "dist/api.js",
-  
- "scripts": {
-  "dev": "ts-node-dev --respawn --transpile-only src/api.ts",
-  "build": "tsc",
-
-  "start": "node dist/api.js",
-  "start:worker": "node dist/worker.js",
-
-  "dev:indexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
-  "dev:backfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
-
-  "indexer": "npm run build && node dist/indexer.js",
-  "backfill": "npm run build && node dist/backfill.js",
-
-  "rebuild-holders": "psql \"$DATABASE_URL\" -f sql/rebuild_holder_balances.sql"
-}
-  
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/api.ts",
+	
+    "devindexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
+	
+    "devbackfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
+	
+    "build": "tsc",
+	
+    "start": "npm run build && node dist/api.js",
+	
+    "indexer": "npm run build && node dist/indexer.js",
+	
+    "backfill": "npm run build && node dist/backfill.js",
+	
+    "rebuild-holders": "psql \"$DATABASE_URL\" -f sql/rebuild_holder_balances.sql",
+	
+    "snapshot:supply": "ts-node src/scripts/snapshotSupply.ts",
+	
+	"start:worker": "node dist/worker.js","
+	
+    "dev": "ts-node-dev --respawn --transpile-only src/api.ts",
+	
+    "start": "node dist/api.js"
+  },
   "dependencies": {
     "@types/node": "^25.0.3",
     "cors": "^2.8.5",
