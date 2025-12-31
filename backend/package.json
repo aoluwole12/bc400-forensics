@@ -5,17 +5,19 @@
   "main": "dist/api.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/api.ts",
-    "devindexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
-    "devbackfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
+    "dev:indexer": "ts-node-dev --respawn --transpile-only src/indexer.ts",
+    "dev:backfill": "ts-node-dev --respawn --transpile-only src/backfill.ts",
+    "dev:worker": "ts-node-dev --respawn --transpile-only src/worker.ts",
+
     "build": "tsc",
-    "start": "npm run build && node dist/api.js",
-    "indexer": "npm run build && node dist/indexer.js",
-    "backfill": "npm run build && node dist/backfill.js",
+
+    "start": "node dist/api.js",
+    "start:indexer": "node dist/indexer.js",
+    "start:backfill": "node dist/backfill.js",
+    "start:worker": "node dist/worker.js",
+
     "rebuild-holders": "psql \"$DATABASE_URL\" -f sql/rebuild_holder_balances.sql",
-    "snapshot:supply": "ts-node src/scripts/snapshotSupply.ts",
-    "dev": "ts-node-dev --respawn --transpile-only src/api.ts",
-    "build": "tsc",
-    "start": "node dist/api.js"
+    "snapshot:supply": "ts-node src/scripts/snapshotSupply.ts"
   },
   "dependencies": {
     "@types/node": "^25.0.3",
