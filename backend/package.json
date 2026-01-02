@@ -12,9 +12,9 @@
     "build": "tsc",
 
     "start": "node dist/api.js",
-    "indexer": "npm run build && node dist/indexer.js",
-    "start:backfill": "node dist/backfill.js",
-    "start:worker": "node dist/worker.js",
+    "indexer": "node dist/indexer.js",
+    "backfill": "node dist/backfill.js",
+    "worker": "node dist/worker.js",
 
     "rebuild-holders": "psql \"$DATABASE_URL\" -f sql/rebuild_holder_balances.sql",
     "snapshot:supply": "ts-node src/scripts/snapshotSupply.ts"
